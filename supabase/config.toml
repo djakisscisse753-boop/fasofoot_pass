@@ -1,0 +1,8 @@
+[functions.initiate-yenga-payment]
+verify_jwt = true
+
+[functions.initiate-marketplace-payment]
+verify_jwt = true
+
+[functions.yenga-webhook]
+verify_jwt = false
