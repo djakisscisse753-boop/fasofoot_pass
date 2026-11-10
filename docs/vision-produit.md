@@ -39,7 +39,7 @@ Les rôles sont contrôlés côté base de données et côté serveur. Masquer u
 
 ## État technique connu
 
-Le dépôt utilise Flutter et Supabase. La base distante contient déjà `clubs`, `matches`, `match_results`, `match_ticket_categories`, `stadiums`, `stadium_zones`, `products`, `profiles`, `tickets`, `transactions`, `polls` et `votes`. Les migrations de billetterie 001–003 sont appliquées. La table des matchs est actuellement vide; le catalogue des produits et les résultats doivent aussi recevoir des données validées.
+Le dépôt utilise Flutter et Supabase. La base distante contient `clubs`, `matches`, `match_results`, `match_ticket_categories`, `stadiums`, `stadium_zones`, `products`, `profiles`, `tickets`, `transactions`, `polls` et `votes`. Les schémas distants et locaux ont divergé sur les zones de stade; le catalogue `ticket_catalog` est la source de vérité pour les billets. Vérifier les matchs, résultats et produits comme données officielles avant lancement public.
 
 L'application a déjà les premiers écrans d'authentification, billets, scan et boutique, mais certains écrans ne sont pas reliés à la navigation ou ne font qu'afficher une maquette. Le webhook YengaPay doit être configuré avec son secret de signature avant d'activer les paiements réels.
 
@@ -88,6 +88,8 @@ L'application a déjà les premiers écrans d'authentification, billets, scan et
 ## Avancement de cette première tranche
 
 - Navigation Flutter reliée aux écrans de résultats/classement, de billets, de boutique et de profil.
+- La confirmation des paiements marketplace est réservée au webhook YengaPay signé; l'interface ne peut que rafraîchir l'état du paiement.
+- Le code de retrait est masqué tant qu'un paiement n'a pas été confirmé par le prestataire.
 - Classement de ligue calculé depuis les résultats terminés; les autres compétitions ne sont pas présentées comme des ligues.
 - Profil relié à Supabase avec modification du nom et du club favori; l'attribution des rôles reste réservée à un canal de confiance.
 - Première console d'administration : programmer un match, publier/corriger un score, ajouter/masquer un produit selon le rôle.

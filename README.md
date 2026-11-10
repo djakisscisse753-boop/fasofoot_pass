@@ -23,9 +23,13 @@ Les migrations doivent être appliquées dans l'ordre avec le projet Supabase li
 8. `202610190008_catalog_handoff_readiness.sql` — rattachement de l'ancien catalogue et blocage de publication sans moyen de remise.
 9. `202610200009_profile_on_signup.sql` — création automatique du profil supporter après inscription OTP.
 
-Appliquer les changements avec `supabase db push --linked`. Les comptes d'administration doivent recevoir leur rôle depuis un canal de confiance; l'application interdit aux utilisateurs de modifier eux-mêmes leur rôle. Les comptes `admin_club` doivent également avoir leur `managed_club_id` renseigné. Voir [la procédure de mise en service](docs/mise-en-service.md) pour créer le premier administrateur et configurer les points de retrait.
+Les migrations ultérieures maintiennent le catalogue et les paiements. La migration `202610210022_stadium_capacity_and_pricing.sql` ajoute les capacités au catalogue sans remplir de zones génériques, car leur structure dépend du stade. `202610260023_sync_existing_ticket_categories.sql` reprend les catégories existantes. `202610260024_sync_ticket_catalog_to_match_categories.sql` est volontairement sans effet : aucune correspondance fiable entre les stades des matchs et les zones n'est disponible. `20261105110945_ticket_catalog_checkout.sql` rend le catalogue source de vérité pour la réservation. `20261110124645_secure_order_and_ticket_confirmation.sql` réserve la confirmation des commandes au webhook signé et au rôle serveur, limite le scan aux agents de stade et super-administrateurs et transforme l'action de vérification en simple lecture d'état. `20261110125932_pickup_code_after_payment.sql` empêche l'exposition d'un code de retrait avant confirmation effective du paiement. `20261110130501_scope_payment_status_by_club.sql` applique aux lectures de statut les mêmes limites RLS que les écrans de commandes.
 
-Les matchs proviennent de `matches`, les scores de `match_results`, et les articles de `products`. Le projet distant n'a pas encore de matchs programmés. Les résultats et produits déjà présents doivent être vérifiés comme données officielles avant lancement public.
+Avant un déploiement, vérifier les migrations avec `supabase migration list --linked`, puis simuler `supabase db push --linked --dry-run`. Ne pas pousser si la liste locale et distante diverge ou si une migration échoue; examiner le schéma et réconcilier explicitement l'historique avant toute application. Les comptes d'administration doivent recevoir leur rôle depuis un canal de confiance; l'application interdit aux utilisateurs de modifier eux-mêmes leur rôle. Les comptes `admin_club` doivent également avoir leur `managed_club_id` renseigné. Voir [la procédure de mise en service](docs/mise-en-service.md) pour créer le premier administrateur et configurer les points de retrait.
+
+À la dernière vérification de FasoFootBD, les versions 022–024 n'étaient pas enregistrées dans l'historique distant. Elles ont été rendues compatibles avec le catalogue source de vérité, mais leur simulation (`--dry-run`) reste obligatoire avant `db push`.
+
+Les matchs proviennent de `matches`, les scores de `match_results`, et les articles de `products`. Vérifier les matchs, résultats et produits existants comme données officielles avant lancement public.
 
 ## Paiements YengaPay
 
@@ -49,7 +53,7 @@ Configurer ensuite dans la console YengaPay l'URL HTTPS du webhook Supabase et v
 
 - `supporter` : compte, club favori, consultation et achats.
 - `admin_competition` : calendrier et résultats.
-- `admin_club` : catalogue de son club et contrôle des billets.
+- `admin_club` : catalogue et commandes de son club.
 - `agent_stade` : contrôle des billets.
 - `super_admin` : gestion transversale.
 

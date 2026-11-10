@@ -2,9 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'Config/constants.dart';
+import 'Config/theme.dart';
 import 'provider/payment_provider.dart';
 import 'screens/home/home_screen.dart';
 import 'screens/auth/login_screen.dart';
+import 'screens/auth/password_recovery_screen.dart';
+import 'screens/maintenance/maintenance_gate.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -12,6 +15,9 @@ Future<void> main() async {
   await Supabase.initialize(
     url: AppConstants.supabaseUrl,
     publishableKey: AppConstants.supabaseAnonKey,
+    authOptions: const FlutterAuthClientOptions(
+      authFlowType: AuthFlowType.pkce,
+    ),
   );
 
   runApp(const FasoFootApp());
@@ -32,17 +38,15 @@ class FasoFootApp extends StatelessWidget {
       child: MaterialApp(
         title: AppConstants.appName,
         debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(
-            seedColor: const Color(0xFF008751),
-            primary: const Color(0xFF008751),
-            secondary: const Color(0xFFDA121A),
-          ),
-          useMaterial3: true,
-        ),
+        builder: (context, navigator) =>
+            MaintenanceGate(child: navigator ?? const SizedBox.shrink()),
+        theme: AppTheme.dark,
         home: StreamBuilder<AuthState>(
           stream: Supabase.instance.client.auth.onAuthStateChange,
           builder: (context, snapshot) {
+            if (snapshot.data?.event == AuthChangeEvent.passwordRecovery) {
+              return const PasswordRecoveryScreen();
+            }
             final session =
                 snapshot.data?.session ??
                 Supabase.instance.client.auth.currentSession;

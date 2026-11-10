@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../Config/theme.dart';
 import '../../models/match_model.dart';
 import '../../services/supabase_service.dart';
 import '../marketplace/marketplace_screen.dart';
@@ -116,7 +117,14 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 );
               }
-              return _buildHomeContent(snapshot.data ?? const []);
+              return RefreshIndicator(
+                onRefresh: () async {
+                  final future = SupabaseService().getUpcomingMatches();
+                  setState(() => _matchesFuture = future);
+                  await future;
+                },
+                child: _buildHomeContent(snapshot.data ?? const []),
+              );
             },
           ),
           const ResultsScreen(),
@@ -130,7 +138,7 @@ class _HomeScreenState extends State<HomeScreen> {
         onTap: (index) => setState(() => _selectedIndex = index),
         backgroundColor: const Color(0xFF1A2634),
         selectedItemColor: const Color(0xFFFCD116),
-        unselectedItemColor: Colors.grey,
+        unselectedItemColor: AppColors.textMuted,
         type: BottomNavigationBarType.fixed,
         items: const [
           BottomNavigationBarItem(
@@ -216,9 +224,9 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
         TextButton(
-          onPressed: () {},
+          onPressed: () => setState(() => _selectedIndex = 1),
           child: const Text(
-            "Voir tout",
+            "Voir résultats",
             style: TextStyle(color: Color(0xFF008751)),
           ),
         ),
@@ -272,6 +280,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
                 const SizedBox(height: 12),
+                if (match.homeClubLogoUrl != null ||
+                    match.awayClubLogoUrl != null) ...[
+                  _matchClubLogos(match, 34),
+                  const SizedBox(height: 8),
+                ],
                 Text(
                   match.teams,
                   style: const TextStyle(
@@ -400,6 +413,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      if (match.homeClubLogoUrl != null ||
+                          match.awayClubLogoUrl != null) ...[
+                        _matchClubLogos(match, 24),
+                        const SizedBox(height: 6),
+                      ],
                       Text(
                         match.teams,
                         style: const TextStyle(
@@ -446,7 +464,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildMyTicketsBanner(BuildContext context) {
     return InkWell(
-      onTap: () => setState(() => _selectedIndex = 1),
+      onTap: () => setState(() => _selectedIndex = 2),
       borderRadius: BorderRadius.circular(16),
       child: Container(
         padding: const EdgeInsets.all(16),
@@ -489,3 +507,33 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 }
+
+Widget _matchClubLogos(MatchModel match, double size) => Row(
+  mainAxisSize: MainAxisSize.min,
+  children: [
+    _clubBadge(match.homeClubLogoUrl, size),
+    if (match.homeClubLogoUrl != null && match.awayClubLogoUrl != null)
+      const SizedBox(width: 8),
+    if (match.awayClubLogoUrl != null) _clubBadge(match.awayClubLogoUrl, size),
+  ],
+);
+
+Widget _clubBadge(String? url, double size) => CircleAvatar(
+  radius: size / 2,
+  backgroundColor: const Color(0xFF008751),
+  child: url == null
+      ? const Icon(Icons.shield_outlined, color: Colors.white, size: 16)
+      : ClipOval(
+          child: Image.network(
+            url,
+            width: size,
+            height: size,
+            fit: BoxFit.cover,
+            errorBuilder: (context, error, stackTrace) => const Icon(
+              Icons.shield_outlined,
+              color: Colors.white,
+              size: 16,
+            ),
+          ),
+        ),
+);

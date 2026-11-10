@@ -34,6 +34,9 @@ serve(async (req) => {
     const phone = typeof input.phone_number === "string"
       ? input.phone_number.trim().replace(/[\s-]/g, "")
       : "";
+    const customerName = typeof input.customer_name === "string"
+      ? input.customer_name.trim()
+      : null;
     if (!/^(?:\+?226)?[0-9]{8}$/.test(phone)) return json({ error: "Numéro burkinabè invalide." }, 400);
     if (!Array.isArray(input.items) || input.items.length < 1 || input.items.length > 20) {
       return json({ error: "Le panier est vide ou trop volumineux." }, 400);
@@ -43,6 +46,7 @@ serve(async (req) => {
       p_user_id: authData.user.id,
       p_phone: phone,
       p_items: input.items,
+      p_customer_name: customerName,
     });
     if (reserveError) {
       console.error("Marketplace order reservation rejected:", reserveError.message);
@@ -55,7 +59,7 @@ serve(async (req) => {
       throw new Error("Invalid reservation response");
     }
 
-    const apiBase = (Deno.env.get("YENGAPAY_BASE_URL") ?? "https://api.sandbox.yengapay.com/api/v1").replace(/\/$/, "");
+    const apiBase = (Deno.env.get("YENGAPAY_BASE_URL") ?? "https://api.yengapay.com/api/v1").replace(/\/$/, "");
     const groupId = Deno.env.get("YENGAPAY_GROUP_ID")?.trim() || Deno.env.get("YENGA_ORG_ID")?.trim();
     const projectId = Deno.env.get("YENGAPAY_PROJECT_ID")?.trim() || Deno.env.get("YENGA_PROJECT_ID")?.trim();
     const apiKey = Deno.env.get("YENGAPAY_API_KEY")?.trim() || Deno.env.get("YENGA_API_KEY")?.trim();

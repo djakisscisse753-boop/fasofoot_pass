@@ -36,7 +36,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
         .toList();
     _nameController.text = profile['full_name'] as String? ?? '';
     _favoriteClubId = profile['favorite_club_id'] as String?;
-    return {'profile': profile, 'clubs': clubs, 'phone': user.phone ?? ''};
+    return {
+      'profile': profile,
+      'clubs': clubs,
+      'identity': user.email ?? user.phone ?? 'Compte connecté',
+    };
   }
 
   Future<void> _saveProfile() async {
@@ -104,10 +108,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         final profile = data['profile'] as Map<String, dynamic>;
         final clubs = data['clubs'] as List<Map<String, dynamic>>;
         final role = profile['role'] as String? ?? 'supporter';
-        final canScan = const {
-          'agent_stade',
-          'super_admin',
-        }.contains(role);
+        final canScan = const {'agent_stade', 'super_admin'}.contains(role);
         final canManage = const {
           'admin_competition',
           'admin_club',
@@ -128,7 +129,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
             const SizedBox(height: 12),
             Text(
-              data['phone'] as String,
+              data['identity'] as String,
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70),
             ),

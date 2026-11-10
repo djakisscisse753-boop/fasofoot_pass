@@ -18,4 +18,13 @@ class NewsService {
         .map((json) => MatchResultModel.fromJson(json))
         .toList();
   }
+
+  Future<List<Map<String, dynamic>>> getSeasons(String competitionId) async {
+    final rows = await _supabase
+        .from('seasons')
+        .select('id, name, starts_on, ends_on, is_active, created_at')
+        .eq('competition_id', competitionId)
+        .order('created_at', ascending: false);
+    return (rows as List).map((row) => Map<String, dynamic>.from(row)).toList();
+  }
 }

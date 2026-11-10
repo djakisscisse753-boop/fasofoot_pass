@@ -1,0 +1,3 @@
+-- Intentionally empty.
+-- Ticket categories are canonical in ticket_catalog. They cannot be copied to
+-- stadium_zones without a reliable stadium_id mapping for each match.

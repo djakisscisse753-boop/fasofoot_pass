@@ -50,16 +50,6 @@ serve(async (req) => {
       return json({ error: "Numéro burkinabè invalide." }, 400);
     }
 
-    const { data: catalog, error: catalogError } = await admin
-      .from("ticket_catalog")
-      .select("price")
-      .eq("match_id", matchId)
-      .eq("category_name", categoryName)
-      .eq("is_active", true)
-      .maybeSingle();
-    if (catalogError) throw catalogError;
-    if (!catalog) return json({ error: "Cette catégorie n'est pas disponible." }, 404);
-
     const authorization = req.headers.get("Authorization");
     const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
     if (!authorization?.startsWith("Bearer ") || !anonKey) {
@@ -90,7 +80,7 @@ serve(async (req) => {
     }
     ticketId = reservedTicketId;
 
-    const apiBase = (Deno.env.get("YENGAPAY_BASE_URL") ?? "https://api.sandbox.yengapay.com/api/v1")
+    const apiBase = (Deno.env.get("YENGAPAY_BASE_URL") ?? "https://api.yengapay.com/api/v1")
       .replace(/\/$/, "");
     const groupId = Deno.env.get("YENGAPAY_GROUP_ID")?.trim() ||
       Deno.env.get("YENGA_ORG_ID")?.trim() ||
@@ -121,6 +111,7 @@ serve(async (req) => {
     );
     const paymentData = await paymentResponse.json().catch(() => ({}));
     if (!paymentResponse.ok) {
+      console.error(`YengaPay error: status=${paymentResponse.status}`, JSON.stringify(paymentData));
       if (paymentResponse.status >= 500) {
         return json({
           success: false,
@@ -128,8 +119,14 @@ serve(async (req) => {
           error: "YengaPay n’a pas confirmé la création du paiement. Vérifie ton compte Mobile Money avant de réessayer.",
         });
       }
-      await admin.from("tickets").update({ status: "failed" }).eq("id", ticket.id).eq("status", "pending");
-      return json({ error: paymentData?.error?.message ?? "YengaPay n'a pas pu créer le paiement." }, 502);
+      const { error: ticketUpdateError } = await admin
+        .from("tickets")
+        .update({ status: "failed" })
+        .eq("id", reservedTicketId)
+        .eq("status", "pending");
+      if (ticketUpdateError) throw ticketUpdateError;
+      const errorDetail = paymentData?.error?.message ?? paymentData?.message ?? `Erreur YengaPay (${paymentResponse.status})`;
+      return json({ error: errorDetail }, 502);
     }
 
     const checkoutUrl = paymentData?.checkoutPageUrlWithPaymentToken;
@@ -157,13 +154,14 @@ serve(async (req) => {
       await admin.from("tickets").update({ status: "failed" }).eq("id", ticketId).eq("status", "pending");
     }
     console.error("YengaPay checkout initialization failed:", error);
+    const errString = error instanceof Error ? error.message : String(error);
     if (ticketId && paymentRequestStarted) {
       return json({
         success: false,
         payment_pending: true,
-        error: "Le statut du paiement est incertain. Vérifie ton compte Mobile Money avant de réessayer.",
+        error: `Le statut du paiement est incertain (${errString}). Vérifie ton compte Mobile Money avant de réessayer.`,
       });
     }
-    return json({ error: "Impossible de démarrer le paiement. Réessaie plus tard." }, 500);
+    return json({ error: `Impossible de démarrer le paiement: ${errString}` }, 500);
   }
 });
