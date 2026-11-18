@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../Config/theme.dart';
@@ -17,11 +19,41 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _selectedIndex = 0;
   String _selectedCompetition = 'Toutes';
-  Future<List<MatchModel>> _matchesFuture = SupabaseService()
-      .getUpcomingMatches();
+  late Stream<List<MatchModel>> _matchesStream;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _initStream();
+  }
+
+  void _initStream() {
+    _matchesStream = SupabaseService().streamUpcomingMatches();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _selectedIndex == 0) {
+      setState(() => _initStream());
+    }
+  }
+
+  void _selectTab(int index) {
+    setState(() => _selectedIndex = index);
+    if (index == 0) {
+      setState(() => _initStream());
+    }
+  }
 
   void _navigateToBooking(BuildContext context, MatchModel match) {
     Navigator.push(
@@ -91,13 +123,14 @@ class _HomeScreenState extends State<HomeScreen> {
       body: IndexedStack(
         index: _selectedIndex,
         children: [
-          FutureBuilder<List<MatchModel>>(
-            future: _matchesFuture,
+          StreamBuilder<List<MatchModel>>(
+            stream: _matchesStream,
             builder: (context, snapshot) {
-              if (snapshot.connectionState == ConnectionState.waiting) {
+              if (snapshot.connectionState == ConnectionState.waiting &&
+                  !snapshot.hasData) {
                 return const Center(child: CircularProgressIndicator());
               }
-              if (snapshot.hasError) {
+              if (snapshot.hasError && !snapshot.hasData) {
                 return Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -107,10 +140,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         style: TextStyle(color: Colors.white),
                       ),
                       TextButton(
-                        onPressed: () => setState(
-                          () => _matchesFuture = SupabaseService()
-                              .getUpcomingMatches(),
-                        ),
+                        onPressed: () => setState(() => _initStream()),
                         child: const Text('Réessayer'),
                       ),
                     ],
@@ -119,23 +149,22 @@ class _HomeScreenState extends State<HomeScreen> {
               }
               return RefreshIndicator(
                 onRefresh: () async {
-                  final future = SupabaseService().getUpcomingMatches();
-                  setState(() => _matchesFuture = future);
-                  await future;
+                  setState(() => _initStream());
+                  await SupabaseService().getUpcomingMatches();
                 },
                 child: _buildHomeContent(snapshot.data ?? const []),
               );
             },
           ),
-          const ResultsScreen(),
-          const MyTicketsScreen(),
+          ResultsScreen(isActive: _selectedIndex == 1),
+          MyTicketsScreen(isActive: _selectedIndex == 2),
           const MarketplaceScreen(),
           const ProfileScreen(),
         ],
       ),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _selectedIndex,
-        onTap: (index) => setState(() => _selectedIndex = index),
+        onTap: _selectTab,
         backgroundColor: const Color(0xFF1A2634),
         selectedItemColor: const Color(0xFFFCD116),
         unselectedItemColor: AppColors.textMuted,
@@ -293,6 +322,14 @@ class _HomeScreenState extends State<HomeScreen> {
                     fontWeight: FontWeight.bold,
                   ),
                 ),
+                Text(
+                  _matchCompetitionLabel(match),
+                  style: const TextStyle(
+                    color: Color(0xFFFCD116),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
                 const SizedBox(height: 6),
                 Row(
                   children: [
@@ -426,6 +463,14 @@ class _HomeScreenState extends State<HomeScreen> {
                           fontSize: 15,
                         ),
                       ),
+                      Text(
+                        _matchCompetitionLabel(match),
+                        style: const TextStyle(
+                          color: Color(0xFFFCD116),
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                       const SizedBox(height: 6),
                       Text(
                         "${match.date} • ${match.stadium}${match.city == null || match.city!.isEmpty ? '' : ' · ${match.city}'}",
@@ -460,6 +505,21 @@ class _HomeScreenState extends State<HomeScreen> {
         );
       }).toList(),
     );
+  }
+
+  String _matchCompetitionLabel(MatchModel match) {
+    final details = switch (match.phase) {
+      'knockout' => match.stageName,
+      'group' =>
+        match.groupName == null
+            ? 'Phase de groupes'
+            : 'Groupe ${match.groupName}'
+                  '${match.matchday == null ? '' : ' · Journée ${match.matchday}'}',
+      _ => match.matchday == null ? null : 'Journée ${match.matchday}',
+    };
+    return details == null || details.isEmpty
+        ? match.competition
+        : '${match.competition} · $details';
   }
 
   Widget _buildMyTicketsBanner(BuildContext context) {

@@ -68,6 +68,7 @@ serve(async (req) => {
     const { data: items, error: itemsError } = await admin.from("marketplace_order_items")
       .select("product_title, unit_price, quantity").eq("order_id", orderId);
     if (itemsError) throw itemsError;
+    const webhookUrl = `${supabaseUrl}/functions/v1/yenga-webhook`;
     const paymentResponse = await fetch(
       `${apiBase}/groups/${encodeURIComponent(groupId)}/payment-intent/${encodeURIComponent(projectId)}`,
       {
@@ -76,6 +77,10 @@ serve(async (req) => {
         body: JSON.stringify({
           paymentAmount: amount,
           reference: orderId,
+          callback_url: webhookUrl,
+          callbackUrl: webhookUrl,
+          return_url: webhookUrl,
+          customerNumber: phone,
           articles: (items ?? []).map((item) => ({
             title: item.product_title,
             description: `Quantité : ${item.quantity}`,

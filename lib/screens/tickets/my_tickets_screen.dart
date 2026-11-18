@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:share_plus/share_plus.dart';
@@ -5,26 +7,103 @@ import '../../services/ticket_service.dart';
 import '../../models/ticket_model.dart';
 
 class MyTicketsScreen extends StatefulWidget {
-  const MyTicketsScreen({super.key});
+  const MyTicketsScreen({super.key, this.isActive = true});
+
+  final bool isActive;
 
   @override
   State<MyTicketsScreen> createState() => _MyTicketsScreenState();
 }
 
-class _MyTicketsScreenState extends State<MyTicketsScreen> {
+class _MyTicketsScreenState extends State<MyTicketsScreen>
+    with WidgetsBindingObserver {
   final TicketService _ticketService = TicketService();
-  late Future<List<TicketModel>> _ticketsFuture;
+  late Stream<List<TicketModel>> _ticketsStream;
+  bool _isVerifying = false;
 
   @override
   void initState() {
     super.initState();
-    _refreshTickets();
+    WidgetsBinding.instance.addObserver(this);
+    _initStream();
   }
 
-  void _refreshTickets() {
-    setState(() {
-      _ticketsFuture = _ticketService.getUserTickets();
-    });
+  void _initStream() {
+    _ticketsStream = _ticketService.streamUserTickets();
+  }
+
+  @override
+  void didUpdateWidget(covariant MyTicketsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isActive == widget.isActive) return;
+    if (widget.isActive) {
+      setState(() {
+        _initStream();
+      });
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && widget.isActive) {
+      setState(() {
+        _initStream();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  Future<void> _handleVerifyTicket(TicketModel ticket) async {
+    if (_isVerifying) return;
+    setState(() => _isVerifying = true);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Vérification du paiement en cours...'),
+        duration: Duration(seconds: 2),
+      ),
+    );
+
+    try {
+      final result = await _ticketService.verifyOrConfirmTicket(ticket.id);
+      if (!mounted) return;
+
+      if (result['success'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Billet confirmé ! Votre QR code d’accès est prêt.'),
+            backgroundColor: Color(0xFF008751),
+            duration: Duration(seconds: 3),
+          ),
+        );
+        setState(() => _initStream());
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              result['message'] as String? ?? 'Paiement en attente de validation.',
+            ),
+            backgroundColor: Colors.orange.shade800,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erreur: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isVerifying = false);
+    }
   }
 
   /// Affiche le QR Code agrandi dans une boîte de dialogue modale
@@ -46,7 +125,6 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Titre du dialog
               Text(
                 ticket.categoryName,
                 style: const TextStyle(
@@ -64,7 +142,6 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
                 ),
               ],
               const SizedBox(height: 20),
-              // QR Code agrandi
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -81,7 +158,6 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
                 ),
               ),
               const SizedBox(height: 20),
-              // Infos rapides sous le QR
               if (dateStr != null)
                 _dialogInfoRow(Icons.event, dateStr, const Color(0xFFFCD116)),
               if (ticket.matchStadium != null)
@@ -183,86 +259,100 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
         ),
         backgroundColor: Colors.transparent,
         elevation: 0,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh, color: Colors.white70),
+            tooltip: 'Actualiser',
+            onPressed: () => setState(() => _initStream()),
+          ),
+        ],
       ),
-      body: RefreshIndicator(
-        onRefresh: () async => _refreshTickets(),
-        color: const Color(0xFF008751),
-        child: FutureBuilder<List<TicketModel>>(
-          future: _ticketsFuture,
-          builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return const Center(
-                child: CircularProgressIndicator(color: Color(0xFF008751)),
-              );
-            }
+      body: StreamBuilder<List<TicketModel>>(
+        stream: _ticketsStream,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) {
+            return const Center(
+              child: CircularProgressIndicator(color: Color(0xFF008751)),
+            );
+          }
 
-            if (snapshot.hasError) {
-              return Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.wifi_off_rounded, color: Colors.white38, size: 48),
-                      const SizedBox(height: 12),
-                      const Text(
-                        "Impossible de charger vos billets.",
-                        style: TextStyle(color: Colors.white70),
-                      ),
-                      const SizedBox(height: 12),
-                      OutlinedButton(
-                        onPressed: _refreshTickets,
-                        child: const Text('Réessayer'),
+          if (snapshot.hasError && !snapshot.hasData) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.wifi_off_rounded,
+                      color: Colors.white38,
+                      size: 48,
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      "Impossible de charger vos billets.",
+                      style: TextStyle(color: Colors.white70),
+                    ),
+                    const SizedBox(height: 12),
+                    OutlinedButton(
+                      onPressed: () => setState(() => _initStream()),
+                      child: const Text('Réessayer'),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }
+
+          final tickets = snapshot.data ?? [];
+
+          return RefreshIndicator(
+            onRefresh: () async {
+              setState(() => _initStream());
+              await _ticketService.getUserTickets();
+            },
+            color: const Color(0xFF008751),
+            child: tickets.isEmpty
+                ? ListView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    children: const [
+                      SizedBox(height: 120),
+                      Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.confirmation_number_outlined,
+                              size: 64,
+                              color: Colors.white24,
+                            ),
+                            SizedBox(height: 16),
+                            Text(
+                              "Vous n'avez aucun billet pour le moment.",
+                              style: TextStyle(color: Colors.white70, fontSize: 16),
+                            ),
+                            SizedBox(height: 8),
+                            Text(
+                              "Vos billets achetés s'afficheront ici en temps réel avec leur QR code d'accès au stade.",
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.white38, fontSize: 13),
+                            ),
+                          ],
+                        ),
                       ),
                     ],
+                  )
+                : ListView.builder(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                    itemCount: tickets.length,
+                    itemBuilder: (context, index) {
+                      final ticket = tickets[index];
+                      return _buildTicketCard(ticket);
+                    },
                   ),
-                ),
-              );
-            }
-
-            final tickets = snapshot.data ?? [];
-
-            if (tickets.isEmpty) {
-              return ListView(
-                children: const [
-                  SizedBox(height: 120),
-                  Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.confirmation_number_outlined,
-                          size: 64,
-                          color: Colors.white24,
-                        ),
-                        SizedBox(height: 16),
-                        Text(
-                          "Vous n'avez aucun billet pour le moment.",
-                          style: TextStyle(color: Colors.white70, fontSize: 16),
-                        ),
-                        SizedBox(height: 8),
-                        Text(
-                          "Vos billets achetés s'afficheront ici avec leur QR code d'accès au stade.",
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.white38, fontSize: 13),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              );
-            }
-
-            return ListView.builder(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-              itemCount: tickets.length,
-              itemBuilder: (context, index) {
-                final ticket = tickets[index];
-                return _buildTicketCard(ticket);
-              },
-            );
-          },
-        ),
+          );
+        },
       ),
     );
   }
@@ -570,6 +660,38 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
               ],
             ),
           ),
+          // Bouton d'action si le billet est en attente
+          if (isPending)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF008751),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  onPressed: _isVerifying ? null : () => _handleVerifyTicket(ticket),
+                  icon: _isVerifying
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        )
+                      : const Icon(Icons.verified, size: 18),
+                  label: Text(
+                    _isVerifying
+                        ? "Vérification en cours..."
+                        : "J'ai payé · Obtenir mon QR Code",
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  ),
+                ),
+              ),
+            ),
           // Pied du billet : Infos accès + bouton Partager
           Container(
             width: double.infinity,
@@ -601,7 +723,7 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
                           isUsed
                               ? "Ce billet a déjà été scanné et utilisé."
                               : isPending
-                                  ? "Paiement en cours de vérification..."
+                                  ? "Paiement en attente. Appuyez sur 'J'ai payé' si validé."
                                   : isValid
                                       ? "Présentez ce QR Code au portillon d'accès."
                                       : "Billet non valide.",

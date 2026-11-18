@@ -1,32 +1,109 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../../models/match_result_model.dart';
 import '../../services/news_service.dart';
 
 class ResultsScreen extends StatefulWidget {
-  const ResultsScreen({super.key});
+  const ResultsScreen({super.key, this.isActive = true});
+
+  final bool isActive;
 
   @override
   State<ResultsScreen> createState() => _ResultsScreenState();
 }
 
-class _ResultsScreenState extends State<ResultsScreen> {
+class _ResultsData {
+  final List<MatchResultModel> results;
+  final List<Map<String, dynamic>> competitions;
+
+  const _ResultsData({required this.results, required this.competitions});
+}
+
+class _ResultsScreenState extends State<ResultsScreen>
+    with WidgetsBindingObserver {
   final NewsService _service = NewsService();
-  late Future<List<MatchResultModel>> _resultsFuture;
+  late Future<_ResultsData> _resultsFuture;
   String _selectedCategory = 'Toutes';
   String _selectedSeasonId = 'all';
-  bool _activeSeasonChosen = false;
   Future<List<Map<String, dynamic>>>? _seasonsFuture;
+  Future<List<Map<String, dynamic>>>? _teamsFuture;
+  Timer? _refreshTimer;
+  bool _isRefreshing = false;
 
   @override
   void initState() {
     super.initState();
-    _resultsFuture = _service.getMatchResults();
+    WidgetsBinding.instance.addObserver(this);
+    _resultsFuture = _load();
+    if (widget.isActive) _startRefreshing();
+  }
+
+  @override
+  void didUpdateWidget(covariant ResultsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isActive == widget.isActive) return;
+    if (!widget.isActive) {
+      _refreshTimer?.cancel();
+      _refreshTimer = null;
+      return;
+    }
+
+    _startRefreshing();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && widget.isActive) _refresh();
+    });
+  }
+
+  void _startRefreshing() {
+    _refreshTimer?.cancel();
+    _refreshTimer = Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => _refresh(),
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && widget.isActive) _refresh();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<_ResultsData> _load() async {
+    final values = await Future.wait([
+      _service.getMatchResults(),
+      _service.getCompetitions(),
+    ]);
+    return _ResultsData(
+      results: values[0] as List<MatchResultModel>,
+      competitions: values[1] as List<Map<String, dynamic>>,
+    );
   }
 
   Future<void> _refresh() async {
-    final future = _service.getMatchResults();
-    setState(() => _resultsFuture = future);
-    await future;
+    if (_isRefreshing) return;
+    _isRefreshing = true;
+    final future = _load();
+    final teamsFuture = _selectedSeasonId == 'all'
+        ? null
+        : _service.getCompetitionTeams(_selectedSeasonId);
+    setState(() {
+      _resultsFuture = future;
+      _teamsFuture = teamsFuture;
+    });
+    try {
+      await future;
+    } catch (error) {
+      debugPrint('Échec de l’actualisation des résultats : $error');
+    } finally {
+      _isRefreshing = false;
+    }
   }
 
   @override
@@ -42,13 +119,16 @@ class _ResultsScreenState extends State<ResultsScreen> {
         foregroundColor: Colors.white,
         elevation: 0,
       ),
-      body: FutureBuilder<List<MatchResultModel>>(
+      body: FutureBuilder<_ResultsData>(
         future: _resultsFuture,
         builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator(color: Color(0xFF008751)));
+          if (snapshot.connectionState == ConnectionState.waiting &&
+              !snapshot.hasData) {
+            return const Center(
+              child: CircularProgressIndicator(color: Color(0xFF008751)),
+            );
           }
-          if (snapshot.hasError) {
+          if (snapshot.hasError && !snapshot.hasData) {
             return _message(
               'Impossible de charger les résultats. Réessayez dans un instant.',
               action: TextButton(
@@ -58,9 +138,14 @@ class _ResultsScreenState extends State<ResultsScreen> {
             );
           }
 
-          final results = snapshot.data ?? const <MatchResultModel>[];
-          final categories =
-              results.map((match) => match.category).toSet().toList()..sort();
+          final resultsData = snapshot.data!;
+          final results = resultsData.results;
+          final categories = {
+            ...results.map((match) => match.category),
+            ...resultsData.competitions.map(
+              (competition) => competition['name'] as String,
+            ),
+          }.toList()..sort();
           if (_selectedCategory != 'Toutes' &&
               !categories.contains(_selectedCategory)) {
             _selectedCategory = 'Toutes';
@@ -70,12 +155,21 @@ class _ResultsScreenState extends State<ResultsScreen> {
               : results
                     .where((match) => match.category == _selectedCategory)
                     .toList();
-          final competitionIds = filtered
+          final matchingCompetitions = resultsData.competitions
+              .where((competition) => competition['name'] == _selectedCategory)
+              .toList();
+          final selectedCompetition = matchingCompetitions.isEmpty
+              ? null
+              : matchingCompetitions.first;
+          final resultCompetitionIds = filtered
               .map((match) => match.competitionId)
               .whereType<String>()
               .toList();
           final competitionId =
-              competitionIds.isEmpty ? null : competitionIds.first;
+              selectedCompetition?['id'] as String? ??
+              (resultCompetitionIds.isEmpty
+                  ? null
+                  : resultCompetitionIds.first);
           if (_selectedCategory != 'Toutes' &&
               competitionId != null &&
               _seasonsFuture == null) {
@@ -84,40 +178,88 @@ class _ResultsScreenState extends State<ResultsScreen> {
           final seasonFiltered = _selectedSeasonId == 'all'
               ? filtered
               : filtered
-                    .where((match) => match.seasonId == _selectedSeasonId)
+                    .where(
+                      (match) =>
+                          match.seasonId == _selectedSeasonId ||
+                          match.seasonId == null,
+                    )
                     .toList();
+          final competitionType =
+              selectedCompetition?['competition_type'] as String? ??
+              (filtered.isEmpty ? null : filtered.first.competitionType);
           final isLeague =
-              _selectedCategory.toLowerCase().contains('ligue');
+              _selectedCategory != 'Toutes' &&
+              (competitionType == 'league' ||
+                  (competitionType == null &&
+                      _selectedCategory.toLowerCase().contains('ligue')));
+          final hasGroups =
+              _selectedCategory != 'Toutes' &&
+              competitionType == 'international';
 
-          return RefreshIndicator(
-            onRefresh: _refresh,
-            color: const Color(0xFF008751),
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
-              children: [
-                _categorySelector(categories),
-                if (_selectedCategory != 'Toutes' && isLeague)
-                  _seasonSelector(),
-                if (isLeague) ...[
-                  const SizedBox(height: 24),
-                  _sectionTitle('Classement général'),
-                  _buildStandings(seasonFiltered),
-                ],
-                const SizedBox(height: 24),
-                _sectionTitle('Résultats des rencontres'),
-                if (seasonFiltered.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 36),
-                    child: Text(
-                      'Aucun résultat publié pour cette compétition.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.white60),
-                    ),
-                  )
-                else
-                  ...seasonFiltered.map(_resultCard),
-              ],
-            ),
+          if (_teamsFuture == null && competitionId != null) {
+            _teamsFuture = _service.getSeasons(competitionId).then((seasons) {
+              final activeSeason = seasons
+                  .cast<Map<String, dynamic>?>()
+                  .firstWhere(
+                    (season) => season?['is_active'] == true,
+                    orElse: () => seasons.isNotEmpty ? seasons.first : null,
+                  );
+              final targetSeasonId = _selectedSeasonId != 'all'
+                  ? _selectedSeasonId
+                  : (activeSeason?['id'] as String?);
+              if (targetSeasonId == null) return <Map<String, dynamic>>[];
+              return _service.getCompetitionTeams(targetSeasonId);
+            });
+          }
+
+          return FutureBuilder<List<Map<String, dynamic>>>(
+            future: _teamsFuture,
+            builder: (context, teamsSnapshot) {
+              final teams = teamsSnapshot.data ?? const [];
+              return RefreshIndicator(
+                onRefresh: _refresh,
+                color: const Color(0xFF008751),
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+                  children: [
+                    _categorySelector(categories),
+                    if (_selectedCategory != 'Toutes' && competitionId != null)
+                      _seasonSelector(),
+                    if (teamsSnapshot.hasError && (isLeague || hasGroups))
+                      const Padding(
+                        padding: EdgeInsets.only(top: 12),
+                        child: Text(
+                          'Les équipes inscrites au classement n’ont pas pu être chargées.',
+                          style: TextStyle(color: Colors.redAccent),
+                        ),
+                      ),
+                    if (isLeague) ...[
+                      const SizedBox(height: 24),
+                      _sectionTitle('Classement général'),
+                      _buildStandings(seasonFiltered, teams: teams),
+                    ],
+                    if (hasGroups) ...[
+                      const SizedBox(height: 24),
+                      _sectionTitle('Classements des groupes'),
+                      _buildGroupStandings(seasonFiltered, teams: teams),
+                    ],
+                    const SizedBox(height: 24),
+                    _sectionTitle('Résultats des rencontres'),
+                    if (seasonFiltered.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 36),
+                        child: Text(
+                          'Aucun résultat publié pour cette compétition.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white60),
+                        ),
+                      )
+                    else
+                      ...seasonFiltered.map(_resultCard),
+                  ],
+                ),
+              );
+            },
           );
         },
       ),
@@ -139,8 +281,8 @@ class _ResultsScreenState extends State<ResultsScreen> {
               setState(() {
                 _selectedCategory = category;
                 _selectedSeasonId = 'all';
-                _activeSeasonChosen = false;
                 _seasonsFuture = null;
+                _teamsFuture = null;
               });
             },
             selectedColor: const Color(0xFF008751),
@@ -161,19 +303,6 @@ class _ResultsScreenState extends State<ResultsScreen> {
     builder: (context, snapshot) {
       final seasons = snapshot.data ?? const <Map<String, dynamic>>[];
       if (!snapshot.hasData || seasons.isEmpty) return const SizedBox.shrink();
-      final activeSeason = seasons.cast<Map<String, dynamic>?>().firstWhere(
-        (season) => season?['is_active'] == true,
-        orElse: () => null,
-      );
-      if (!_activeSeasonChosen && activeSeason != null) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted || _activeSeasonChosen) return;
-          setState(() {
-            _selectedSeasonId = activeSeason['id'] as String;
-            _activeSeasonChosen = true;
-          });
-        });
-      }
       if (_selectedSeasonId != 'all' &&
           !seasons.any((season) => season['id'] == _selectedSeasonId)) {
         _selectedSeasonId = 'all';
@@ -206,15 +335,29 @@ class _ResultsScreenState extends State<ResultsScreen> {
           ],
           onChanged: (value) => setState(() {
             _selectedSeasonId = value ?? 'all';
-            _activeSeasonChosen = true;
+            _teamsFuture = _selectedSeasonId == 'all'
+                ? null
+                : _service.getCompetitionTeams(_selectedSeasonId);
           }),
         ),
       );
     },
   );
 
-  Widget _buildStandings(List<MatchResultModel> matches) {
+  Widget _buildStandings(
+    List<MatchResultModel> matches, {
+    List<Map<String, dynamic>> teams = const [],
+  }) {
     final table = <String, _Standing>{};
+    for (final team in teams) {
+      final name = team['team_name'] as String?;
+      if (name != null && name.trim().isNotEmpty) {
+        table.putIfAbsent(
+          name,
+          () => _Standing(name, qualified: team['is_qualified'] == true),
+        );
+      }
+    }
     for (final match in matches.where((item) => _isFinished(item.status))) {
       final home = table.putIfAbsent(
         match.homeTeamName,
@@ -284,7 +427,12 @@ class _ResultsScreenState extends State<ResultsScreen> {
           ),
           for (var i = 0; i < standings.length; i++) ...[
             if (i > 0)
-              const Divider(height: 1, color: Colors.white10, indent: 12, endIndent: 12),
+              const Divider(
+                height: 1,
+                color: Colors.white10,
+                indent: 12,
+                endIndent: 12,
+              ),
             _StandingRow(
               position: '${i + 1}',
               team: standings[i].name,
@@ -292,13 +440,63 @@ class _ResultsScreenState extends State<ResultsScreen> {
               won: '${standings[i].won}',
               drawn: '${standings[i].drawn}',
               lost: '${standings[i].lost}',
-              difference: '${standings[i].goalDifference > 0 ? '+' : ''}${standings[i].goalDifference}',
+              difference:
+                  '${standings[i].goalDifference > 0 ? '+' : ''}${standings[i].goalDifference}',
               points: '${standings[i].points}',
               isTop: i < 3,
+              qualified: standings[i].qualified,
             ),
           ],
         ],
       ),
+    );
+  }
+
+  Widget _buildGroupStandings(
+    List<MatchResultModel> matches, {
+    List<Map<String, dynamic>> teams = const [],
+  }) {
+    final grouped = <String, List<MatchResultModel>>{};
+    for (final team in teams) {
+      final group = team['group_name'] as String?;
+      if (group != null) grouped.putIfAbsent(group, () => []);
+    }
+    for (final match in matches.where(
+      (item) => item.phase == 'group' && item.groupName != null,
+    )) {
+      grouped.putIfAbsent(match.groupName!, () => []).add(match);
+    }
+    if (grouped.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 18),
+        child: Text(
+          'Les classements apparaîtront après la publication des premiers résultats de groupe.',
+          style: TextStyle(color: Colors.white60),
+        ),
+      );
+    }
+    final groupNames = grouped.keys.toList()..sort();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final group in groupNames) ...[
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8, top: 10),
+            child: Text(
+              'Groupe $group',
+              style: const TextStyle(
+                color: Color(0xFFFCD116),
+                fontSize: 15,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+          _buildStandings(
+            grouped[group]!,
+            teams: teams.where((team) => team['group_name'] == group).toList(),
+          ),
+        ],
+      ],
     );
   }
 
@@ -314,7 +512,9 @@ class _ResultsScreenState extends State<ResultsScreen> {
         color: const Color(0xFF1A2634),
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
-          color: live ? Colors.redAccent.withValues(alpha: 0.6) : Colors.white10,
+          color: live
+              ? Colors.redAccent.withValues(alpha: 0.6)
+              : Colors.white10,
           width: live ? 1.5 : 1,
         ),
         boxShadow: const [
@@ -334,19 +534,51 @@ class _ResultsScreenState extends State<ResultsScreen> {
               color: live
                   ? Colors.redAccent.withValues(alpha: 0.15)
                   : Colors.white.withValues(alpha: 0.03),
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(15)),
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(15),
+              ),
             ),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
-                  match.category.toUpperCase(),
-                  style: const TextStyle(
-                    color: Color(0xFFFCD116),
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 0.6,
-                  ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      match.category.toUpperCase(),
+                      style: const TextStyle(
+                        color: Color(0xFFFCD116),
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 0.6,
+                      ),
+                    ),
+                    if (match.stageName != null &&
+                        match.stageName!.trim().isNotEmpty)
+                      Text(
+                        match.stageName!,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 11,
+                        ),
+                      )
+                    else if (match.matchday != null)
+                      Text(
+                        'Journée ${match.matchday}',
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 11,
+                        ),
+                      )
+                    else if (match.groupName != null)
+                      Text(
+                        'Groupe ${match.groupName}',
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 11,
+                        ),
+                      ),
+                  ],
                 ),
                 if (live)
                   Row(
@@ -373,10 +605,7 @@ class _ResultsScreenState extends State<ResultsScreen> {
                 else
                   Text(
                     _date(match.matchDate),
-                    style: const TextStyle(
-                      color: Colors.white54,
-                      fontSize: 12,
-                    ),
+                    style: const TextStyle(color: Colors.white54, fontSize: 12),
                   ),
               ],
             ),
@@ -399,7 +628,10 @@ class _ResultsScreenState extends State<ResultsScreen> {
                 ),
                 Container(
                   margin: const EdgeInsets.symmetric(horizontal: 12),
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 8,
+                  ),
                   decoration: BoxDecoration(
                     color: const Color(0xFF0B151D),
                     borderRadius: BorderRadius.circular(12),
@@ -411,6 +643,7 @@ class _ResultsScreenState extends State<ResultsScreen> {
                   child: Text(
                     finished || live
                         ? '${match.homeScore} - ${match.awayScore}'
+                              '${match.homePenalties != null && match.awayPenalties != null ? '\nTAB ${match.homePenalties}-${match.awayPenalties}' : ''}'
                         : 'vs',
                     style: const TextStyle(
                       color: Colors.white,
@@ -420,6 +653,37 @@ class _ResultsScreenState extends State<ResultsScreen> {
                     ),
                   ),
                 ),
+                if (finished &&
+                    match.winnerTeamName != null &&
+                    match.phase == 'knockout') ...[
+                  const Divider(color: Colors.white12, height: 1),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 9,
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.check_circle_outline,
+                          color: Color(0xFF7ED6A5),
+                          size: 16,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Qualifié : ${match.winnerTeamName}',
+                            style: const TextStyle(
+                              color: Color(0xFF7ED6A5),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
                 Expanded(
                   child: Text(
                     match.awayTeamName,
@@ -450,7 +714,8 @@ class _ResultsScreenState extends State<ResultsScreen> {
                       match.scorers!,
                       const Color(0xFF7ED6A5),
                     ),
-                  if (match.assists != null && match.assists!.trim().isNotEmpty) ...[
+                  if (match.assists != null &&
+                      match.assists!.trim().isNotEmpty) ...[
                     const SizedBox(height: 6),
                     _eventItem(
                       Icons.auto_awesome_motion_outlined,
@@ -468,30 +733,31 @@ class _ResultsScreenState extends State<ResultsScreen> {
     );
   }
 
-  Widget _eventItem(IconData icon, String label, String value, Color color) => Row(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Icon(icon, size: 14, color: color),
-      const SizedBox(width: 6),
-      Text(
-        '$label ',
-        style: TextStyle(
-          color: color,
-          fontSize: 12,
-          fontWeight: FontWeight.bold,
-        ),
-      ),
-      Expanded(
-        child: Text(
-          value,
-          style: TextStyle(
-            color: Colors.white.withValues(alpha: 0.85),
-            fontSize: 12,
+  Widget _eventItem(IconData icon, String label, String value, Color color) =>
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 6),
+          Text(
+            '$label ',
+            style: TextStyle(
+              color: color,
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+            ),
           ),
-        ),
-      ),
-    ],
-  );
+          Expanded(
+            child: Text(
+              value,
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.85),
+                fontSize: 12,
+              ),
+            ),
+          ),
+        ],
+      );
 
   Widget _sectionTitle(String text) => Padding(
     padding: const EdgeInsets.only(bottom: 12),
@@ -535,6 +801,7 @@ class _ResultsScreenState extends State<ResultsScreen> {
 
 class _Standing {
   final String name;
+  final bool qualified;
   int played = 0;
   int won = 0;
   int drawn = 0;
@@ -542,7 +809,7 @@ class _Standing {
   int goalsFor = 0;
   int goalsAgainst = 0;
 
-  _Standing(this.name);
+  _Standing(this.name, {this.qualified = false});
   int get points => won * 3 + drawn;
   int get goalDifference => goalsFor - goalsAgainst;
 }
@@ -558,6 +825,7 @@ class _StandingRow extends StatelessWidget {
   final String points;
   final bool header;
   final bool isTop;
+  final bool qualified;
 
   const _StandingRow({
     required this.position,
@@ -570,6 +838,7 @@ class _StandingRow extends StatelessWidget {
     required this.points,
     this.header = false,
     this.isTop = false,
+    this.qualified = false,
   });
 
   @override
@@ -588,13 +857,28 @@ class _StandingRow extends StatelessWidget {
           ),
         ),
         Expanded(
-          child: Text(
-            team,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: _style.copyWith(
-              fontWeight: isTop ? FontWeight.bold : _style.fontWeight,
-            ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  team,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: _style.copyWith(
+                    fontWeight: isTop ? FontWeight.bold : _style.fontWeight,
+                  ),
+                ),
+              ),
+              if (qualified)
+                const Padding(
+                  padding: EdgeInsets.only(left: 4),
+                  child: Icon(
+                    Icons.check_circle,
+                    color: Color(0xFF7ED6A5),
+                    size: 14,
+                  ),
+                ),
+            ],
           ),
         ),
         SizedBox(

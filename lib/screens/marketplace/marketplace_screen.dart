@@ -434,8 +434,9 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> {
                               ),
                             ),
                             onPressed: () {
-                              if (sheetContext.mounted)
+                              if (sheetContext.mounted) {
                                 Navigator.pop(sheetContext);
+                              }
                               _addToCart(product, quantity: qty);
                             },
                             icon: const Icon(
@@ -463,8 +464,9 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> {
                               ),
                             ),
                             onPressed: () {
-                              if (sheetContext.mounted)
+                              if (sheetContext.mounted) {
                                 Navigator.pop(sheetContext);
+                              }
                               _addToCart(product, quantity: qty);
                               _openCart();
                             },
@@ -1000,18 +1002,18 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> {
                               ),
                             ),
                           ),
-                        if (isPaid && pickupCode == null)
-                          const Padding(
-                            padding: EdgeInsets.only(top: 10),
-                            child: Text(
-                              'Paiement confirmé, mais code de retrait indisponible. Contactez le support avant de vous déplacer.',
-                              style: TextStyle(
-                                color: Colors.orangeAccent,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ),
                       ],
+                    ),
+                  ),
+                if (isPaid && pickupCode == null)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 10),
+                    child: Text(
+                      'Paiement confirmé, mais code de retrait indisponible. Contactez le support avant de vous déplacer.',
+                      style: TextStyle(
+                        color: Colors.orangeAccent,
+                        fontSize: 12,
+                      ),
                     ),
                   ),
                 if (isPending) ...[

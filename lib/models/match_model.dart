@@ -8,6 +8,10 @@ class MatchModel {
   final String? awayClubLogoUrl;
   final int basePrice;
   final String competition;
+  final String phase;
+  final int? matchday;
+  final String? stageName;
+  final String? groupName;
   final bool isHero;
   final String status; // 'scheduled', 'live', 'finished', 'postponed', 'cancelled'
 
@@ -21,6 +25,10 @@ class MatchModel {
     this.awayClubLogoUrl,
     required this.basePrice,
     this.competition = 'Autre',
+    this.phase = 'league',
+    this.matchday,
+    this.stageName,
+    this.groupName,
     this.isHero = false,
     this.status = 'scheduled',
   });
@@ -46,6 +54,10 @@ class MatchModel {
     competition:
         (json['competition'] as Map<String, dynamic>?)?['name'] as String? ??
         'Autre',
+    phase: json['phase'] as String? ?? 'league',
+    matchday: (json['matchday'] as num?)?.toInt(),
+    stageName: json['stage_name'] as String?,
+    groupName: json['group_name'] as String?,
     isHero: json['is_hero'] as bool? ?? false,
     status: json['status'] as String? ?? 'scheduled',
   );

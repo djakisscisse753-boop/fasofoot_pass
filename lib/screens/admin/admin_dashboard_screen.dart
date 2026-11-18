@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'competition_admin_screen.dart';
 
 class AdminDashboardScreen extends StatelessWidget {
   final String role;
@@ -18,6 +19,7 @@ class AdminDashboardScreen extends StatelessWidget {
     final canManageSport = role == 'admin_competition' || role == 'super_admin';
     final canManageShop = role == 'admin_club' || role == 'super_admin';
     final pages = <Widget>[
+      if (canManageSport) const CompetitionAdminTab(),
       if (canManageSport) const _MatchAdminTab(),
       if (canManageSport) const _ResultAdminTab(),
       if (canManageShop)
@@ -30,6 +32,8 @@ class AdminDashboardScreen extends StatelessWidget {
       if (role == 'super_admin') const _MaintenanceAdminTab(),
     ];
     final tabs = <Tab>[
+      if (canManageSport)
+        const Tab(icon: Icon(Icons.emoji_events_outlined), text: 'Compétitions'),
       if (canManageSport)
         const Tab(icon: Icon(Icons.sports_soccer), text: 'Matchs'),
       if (canManageSport)
@@ -534,29 +538,70 @@ class _MatchAdminTab extends StatefulWidget {
 
 class _MatchAdminTabState extends State<_MatchAdminTab> {
   final _db = Supabase.instance.client;
-  late Future<List<Map<String, dynamic>>> _future;
+  late Stream<List<Map<String, dynamic>>> _matchesStream;
 
   @override
   void initState() {
     super.initState();
-    _future = _load();
+    _initStream();
   }
 
-  Future<List<Map<String, dynamic>>> _load() async {
-    final rows = await _db.from('matches').select().order('date_time');
-    return (rows as List).map((row) => Map<String, dynamic>.from(row)).toList();
+  void _initStream() {
+    _matchesStream = _db
+        .from('matches')
+        .stream(primaryKey: ['id'])
+        .order('date_time', ascending: true)
+        .asyncMap((rows) async {
+          // Enrichissement avec les noms de compétition (jointure manuelle)
+          final competitionIds = rows
+              .map((r) => r['competition_id'])
+              .whereType<String>()
+              .toSet()
+              .toList();
+          Map<String, String> competitionNames = {};
+          if (competitionIds.isNotEmpty) {
+            final comps = await _db
+                .from('competitions')
+                .select('id, name')
+                .inFilter('id', competitionIds);
+            for (final c in comps as List) {
+              competitionNames[c['id'] as String] = c['name'] as String;
+            }
+          }
+          return rows.map((r) {
+            final row = Map<String, dynamic>.from(r);
+            final compId = row['competition_id'] as String?;
+            row['competition'] = compId != null
+                ? {'name': competitionNames[compId] ?? ''}
+                : null;
+            return row;
+          }).toList();
+        });
   }
 
   Future<void> _createMatch() async {
     final competitions = await _db
         .from('competitions')
-        .select('id, name')
+        .select('id, name, competition_type')
         .eq('is_active', true)
         .order('name');
     final clubs = await _db.from('clubs').select('id, name').order('name');
+    final seasons = await _db
+        .from('seasons')
+        .select('id, competition_id, name, is_active')
+        .order('created_at', ascending: false);
+    final competitionTeams = await _db
+        .from('competition_teams')
+        .select(
+          'id, season_id, club_id, team_name, group_name, is_eliminated, is_qualified',
+        );
     if (!mounted) return;
     if ((competitions as List).isEmpty) {
       _notice('Aucune compétition active.');
+      return;
+    }
+    if ((seasons as List).isEmpty) {
+      _notice('Créez d’abord une édition dans l’onglet Compétitions.');
       return;
     }
     final homeTeam = TextEditingController();
@@ -571,13 +616,54 @@ class _MatchAdminTabState extends State<_MatchAdminTab> {
     final decPrice = TextEditingController(text: '2500');
     final vipCapacity = TextEditingController(text: '50');
     final vipPrice = TextEditingController(text: '5000');
-    final currentYear = DateTime.now().year;
-    final seasonName = TextEditingController(
-      text: '$currentYear-${currentYear + 1}',
-    );
     String? competitionId = competitions.first['id'] as String;
+    List<Map<String, dynamic>> seasonsForCompetition() =>
+        (seasons as List)
+            .map((season) => Map<String, dynamic>.from(season))
+            .where((season) => season['competition_id'] == competitionId)
+            .toList();
+    String? seasonId = seasonsForCompetition().isEmpty
+        ? null
+        : (seasonsForCompetition().firstWhere(
+                (season) => season['is_active'] == true,
+                orElse: () => seasonsForCompetition().first,
+              )['id']
+              as String);
     String? homeClubId;
     String? awayClubId;
+    String? homeEntryId;
+    String? awayEntryId;
+    var phase = switch (competitions.first['competition_type']) {
+      'cup' => 'knockout',
+      'international' => 'group',
+      _ => 'league',
+    };
+    bool isEligibleParticipant(Map<String, dynamic> team) {
+      if (team['season_id'] != seasonId) return false;
+      if (phase != 'knockout') return true;
+      final type = competitions.firstWhere(
+        (item) => item['id'] == competitionId,
+      )['competition_type'];
+      return type == 'international'
+          ? team['is_qualified'] == true
+          : team['is_eliminated'] != true;
+    }
+
+    List<Map<String, dynamic>> eligibleParticipants({
+      String? exceptTeamId,
+      String? onlyGroup,
+    }) => competitionTeams
+        .map((team) => Map<String, dynamic>.from(team))
+        .where(
+          (team) =>
+              isEligibleParticipant(team) &&
+              team['id'] != exceptTeamId &&
+              (onlyGroup == null || team['group_name'] == onlyGroup),
+        )
+        .toList();
+    final matchday = TextEditingController(text: '1');
+    final stageName = TextEditingController();
+    final groupName = TextEditingController();
     DateTime dateTime = DateTime.now().add(const Duration(days: 7));
     final formKey = GlobalKey<FormState>();
     final created = await showDialog<bool>(
@@ -605,19 +691,191 @@ class _MatchAdminTabState extends State<_MatchAdminTab> {
                           ),
                         )
                         .toList(),
-                    onChanged: (value) =>
-                        refreshDialog(() => competitionId = value),
+                    onChanged: (value) => refreshDialog(() {
+                      competitionId = value;
+                      final matchingSeasons = seasonsForCompetition();
+                      seasonId = matchingSeasons.isEmpty
+                          ? null
+                          : (matchingSeasons.firstWhere(
+                                  (season) => season['is_active'] == true,
+                                  orElse: () => matchingSeasons.first,
+                                )['id']
+                                as String);
+                      final selected = competitions.firstWhere(
+                        (item) => item['id'] == value,
+                      );
+                      phase = switch (selected['competition_type']) {
+                        'cup' => 'knockout',
+                        'international' => 'group',
+                        _ => 'league',
+                      };
+                      homeEntryId = null;
+                      awayEntryId = null;
+                      homeClubId = null;
+                      awayClubId = null;
+                    }),
                     decoration: const InputDecoration(labelText: 'Compétition'),
                   ),
-                  TextFormField(
-                    controller: seasonName,
-                    textCapitalization: TextCapitalization.words,
+                  DropdownButtonFormField<String>(
+                    key: ValueKey('season-$competitionId-$seasonId'),
+                    initialValue: seasonId,
+                    items: seasonsForCompetition()
+                        .map(
+                          (item) => DropdownMenuItem<String>(
+                            value: item['id'] as String,
+                            child: Text(item['name'] as String),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) => refreshDialog(() {
+                      seasonId = value;
+                      homeEntryId = null;
+                      awayEntryId = null;
+                      homeClubId = null;
+                      awayClubId = null;
+                    }),
+                    validator: (value) =>
+                        value == null ? 'Créez une édition d’abord.' : null,
                     decoration: const InputDecoration(
                       labelText: 'Saison / édition',
-                      hintText: '2026-2027',
                     ),
-                    validator: _required,
                   ),
+                  if (competitions.firstWhere(
+                        (item) => item['id'] == competitionId,
+                      )['competition_type'] ==
+                      'international')
+                    DropdownButtonFormField<String>(
+                      key: ValueKey('phase-$competitionId-$phase'),
+                      initialValue: phase,
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'group',
+                          child: Text('Phase de groupes'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'knockout',
+                          child: Text('Phase éliminatoire'),
+                        ),
+                      ],
+                      onChanged: (value) =>
+                          refreshDialog(() {
+                            phase = value ?? 'group';
+                            homeEntryId = null;
+                            awayEntryId = null;
+                            homeClubId = null;
+                            awayClubId = null;
+                          }),
+                      decoration: const InputDecoration(labelText: 'Phase'),
+                    ),
+                  if (phase != 'knockout')
+                    TextFormField(
+                      controller: matchday,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'Journée / matchday',
+                      ),
+                      validator: _positiveInteger,
+                    ),
+                  if (phase == 'knockout')
+                    TextFormField(
+                      controller: stageName,
+                      textCapitalization: TextCapitalization.sentences,
+                      decoration: const InputDecoration(
+                        labelText: 'Tour',
+                        hintText: '1/16, 1/8, Quart de finale...',
+                      ),
+                      validator: _required,
+                    ),
+                  if (phase == 'group')
+                    TextFormField(
+                      controller: groupName,
+                      textCapitalization: TextCapitalization.characters,
+                      decoration: const InputDecoration(
+                        labelText: 'Groupe',
+                        hintText: 'A',
+                      ),
+                      validator: _required,
+                    ),
+                  if (competitionTeams.any(
+                    (team) => team['season_id'] == seasonId,
+                  )) ...[
+                    if (eligibleParticipants().isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 8),
+                        child: Text(
+                          'Aucune équipe qualifiée/disponible pour ce tour. Terminez les rencontres précédentes.',
+                          style: TextStyle(color: Colors.white60),
+                        ),
+                      ),
+                    DropdownButtonFormField<String>(
+                      key: ValueKey('home-entry-$seasonId-$homeEntryId'),
+                      initialValue: homeEntryId,
+                      items: eligibleParticipants()
+                          .map(
+                            (team) => DropdownMenuItem<String>(
+                              value: team['id'] as String,
+                              child: Text(team['team_name'] as String),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) => refreshDialog(() {
+                        homeEntryId = value;
+                        awayEntryId = null;
+                        final entry = competitionTeams.firstWhere(
+                          (team) => team['id'] == value,
+                        );
+                        homeClubId = entry['club_id'] as String?;
+                        homeTeam.text = entry['team_name'] as String;
+                        if (phase == 'group' &&
+                            entry['group_name'] is String) {
+                          groupName.text = entry['group_name'] as String;
+                        }
+                      }),
+                      validator: (value) => eligibleParticipants().isEmpty
+                          ? 'Terminez la phase précédente avant de programmer ce tour.'
+                          : value == null
+                          ? 'Sélectionnez un participant.'
+                          : null,
+                      decoration: const InputDecoration(
+                        labelText: 'Équipe à domicile',
+                      ),
+                    ),
+                    DropdownButtonFormField<String>(
+                      key: ValueKey('away-entry-$seasonId-$awayEntryId'),
+                      initialValue: awayEntryId,
+                      items: eligibleParticipants(
+                        exceptTeamId: homeEntryId,
+                        onlyGroup: phase == 'group' && homeEntryId != null
+                            ? competitionTeams.firstWhere(
+                                (team) => team['id'] == homeEntryId,
+                              )['group_name'] as String?
+                            : null,
+                      )
+                          .map(
+                            (team) => DropdownMenuItem<String>(
+                              value: team['id'] as String,
+                              child: Text(team['team_name'] as String),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) => refreshDialog(() {
+                        awayEntryId = value;
+                        final entry = competitionTeams.firstWhere(
+                          (team) => team['id'] == value,
+                        );
+                        awayClubId = entry['club_id'] as String?;
+                        awayTeam.text = entry['team_name'] as String;
+                      }),
+                      validator: (value) => eligibleParticipants().isEmpty
+                          ? 'Terminez la phase précédente avant de programmer ce tour.'
+                          : value == null
+                          ? 'Sélectionnez un participant.'
+                          : null,
+                      decoration: const InputDecoration(
+                        labelText: 'Équipe visiteuse',
+                      ),
+                    ),
+                  ] else ...[
                   DropdownButtonFormField<String>(
                     key: ValueKey('home-club-$homeClubId'),
                     initialValue: homeClubId ?? '',
@@ -684,6 +942,7 @@ class _MatchAdminTabState extends State<_MatchAdminTab> {
                       ),
                       validator: _required,
                     ),
+                  ],
                   TextFormField(
                     controller: stadium,
                     decoration: const InputDecoration(labelText: 'Stade'),
@@ -846,7 +1105,7 @@ class _MatchAdminTabState extends State<_MatchAdminTab> {
         ),
       ),
     );
-    if (created == true && competitionId != null) {
+    if (created == true && competitionId != null && seasonId != null) {
       try {
         final selectedCompetitionId = competitionId!;
         final homeClub = homeClubId == null
@@ -857,20 +1116,33 @@ class _MatchAdminTabState extends State<_MatchAdminTab> {
             : clubs.firstWhere((club) => club['id'] == awayClubId);
         final homeName = homeClub?['name'] as String? ?? homeTeam.text.trim();
         final awayName = awayClub?['name'] as String? ?? awayTeam.text.trim();
-        final season = await _db
-            .from('seasons')
-            .upsert({
-              'competition_id': selectedCompetitionId,
-              'name': seasonName.text.trim(),
-              'is_active': true,
-            }, onConflict: 'competition_id,name')
-            .select('id')
-            .single();
-        await _db
-            .from('seasons')
-            .update({'is_active': false})
-            .eq('competition_id', selectedCompetitionId)
-            .neq('id', season['id']);
+        final homeEntry = homeEntryId == null
+            ? null
+            : competitionTeams.firstWhere(
+                (team) => team['id'] == homeEntryId,
+              );
+        final awayEntry = awayEntryId == null
+            ? null
+            : competitionTeams.firstWhere(
+                (team) => team['id'] == awayEntryId,
+              );
+        if (phase == 'group' &&
+            homeEntry != null &&
+            awayEntry != null &&
+            homeEntry['group_name'] != awayEntry['group_name']) {
+          throw StateError(
+            'Un match de groupe doit opposer deux équipes du même groupe.',
+          );
+        }
+        final selectedGroup = homeEntry?['group_name'] as String? ??
+            (groupName.text.trim().isEmpty ? null : groupName.text.trim());
+        if (phase == 'group' &&
+            awayEntry != null &&
+            selectedGroup != awayEntry['group_name']) {
+          throw StateError(
+            'Les deux équipes doivent appartenir au groupe sélectionné.',
+          );
+        }
         final pCapacity = int.tryParse(popCapacity.text.trim()) ?? 0;
         final pPrice = int.tryParse(popPrice.text.trim()) ?? 1000;
         final dCapacity = int.tryParse(decCapacity.text.trim()) ?? 0;
@@ -889,7 +1161,15 @@ class _MatchAdminTabState extends State<_MatchAdminTab> {
           'city': city.text.trim(),
           'price': basePrice,
           'competition_id': selectedCompetitionId,
-          'season_id': season['id'],
+          'season_id': seasonId,
+          'phase': phase,
+          'matchday': phase == 'knockout'
+              ? null
+              : int.parse(matchday.text.trim()),
+          'stage_name': phase == 'knockout' ? stageName.text.trim() : null,
+          'group_name': phase == 'group' ? selectedGroup : null,
+          'home_competition_team_id': homeEntryId,
+          'away_competition_team_id': awayEntryId,
           'status': 'scheduled',
           'is_hero': false,
         }).select('id').single();
@@ -976,10 +1256,10 @@ class _MatchAdminTabState extends State<_MatchAdminTab> {
           } catch (_) {}
         }
 
-        // 3. Rafraîchissement de l'interface admin
+        // 3. Le stream se rafraîchit automatiquement
         if (mounted) {
           setState(() {
-            _future = _load();
+            _initStream();
           });
           _notice('Match programmé et publié avec succès !');
         }
@@ -1000,7 +1280,9 @@ class _MatchAdminTabState extends State<_MatchAdminTab> {
     decPrice.dispose();
     vipCapacity.dispose();
     vipPrice.dispose();
-    seasonName.dispose();
+    matchday.dispose();
+    stageName.dispose();
+    groupName.dispose();
   }
 
   void _notice(String text) {
@@ -1008,32 +1290,94 @@ class _MatchAdminTabState extends State<_MatchAdminTab> {
   }
 
   @override
-  Widget build(BuildContext context) => _adminList(
-    title: 'Calendrier des matchs',
-    action: IconButton(
-      onPressed: _createMatch,
-      icon: const Icon(Icons.add, color: Color(0xFFFCD116)),
-    ),
-    future: _future,
-    emptyText: 'Aucun match programmé.',
-    itemBuilder: (row) => ListTile(
-      title: Text(
-        row['teams'] as String? ?? 'Match',
-        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-      ),
-      subtitle: Text(
-        '${_formatAdminDate(row['date_time'] as String?)} · ${row['stadium'] ?? 'Stade'}${row['city'] != null && row['city'] != '' ? ' (${row['city']})' : ''}',
-        style: const TextStyle(color: Colors.white60, fontSize: 13),
-      ),
-      trailing: _AdminMatchStatusMenu(
-        matchId: row['id'] as String,
-        currentStatus: row['status'] as String? ?? 'scheduled',
-        onStatusChanged: () => setState(() {
-          _future = _load();
-        }),
-      ),
-    ),
-  );
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+          child: Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Calendrier des matchs',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Actualiser',
+                onPressed: () => setState(() => _initStream()),
+                icon: const Icon(Icons.refresh, color: Colors.white70),
+              ),
+              IconButton(
+                tooltip: 'Programmer un match',
+                onPressed: _createMatch,
+                icon: const Icon(Icons.add_circle, color: Color(0xFFFCD116)),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: StreamBuilder<List<Map<String, dynamic>>>(
+            stream: _matchesStream,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              if (snapshot.hasError) {
+                return const Center(
+                  child: Text(
+                    'Chargement impossible.',
+                    style: TextStyle(color: Colors.white70),
+                  ),
+                );
+              }
+              final rows = snapshot.data ?? [];
+              if (rows.isEmpty) {
+                return const Center(
+                  child: Text(
+                    'Aucun match programmé.',
+                    style: TextStyle(color: Colors.white60),
+                  ),
+                );
+              }
+              return ListView.separated(
+                itemCount: rows.length,
+                separatorBuilder: (context, index) =>
+                    const Divider(height: 1, color: Colors.white12),
+                itemBuilder: (_, index) {
+                  final row = rows[index];
+                  return ListTile(
+                    title: Text(
+                      row['teams'] as String? ?? 'Match',
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                    ),
+                    subtitle: Text(
+                      '${(row['competition'] as Map<String, dynamic>?)?['name'] ?? 'Compétition'}'
+                      '${row['stage_name'] != null ? ' · ${row['stage_name']}' : row['matchday'] != null ? ' · Journée ${row['matchday']}' : ''}'
+                      '${row['group_name'] != null ? ' · Groupe ${row['group_name']}' : ''}'
+                      ' · ${_formatAdminDate(row['date_time'] as String?)}'
+                      ' · ${row['stadium'] ?? 'Stade'}'
+                      '${row['city'] != null && row['city'] != '' ? ' (${row['city']})' : ''}',
+                      style: const TextStyle(color: Colors.white60, fontSize: 13),
+                    ),
+                    trailing: _AdminMatchStatusMenu(
+                      matchId: row['id'] as String,
+                      currentStatus: row['status'] as String? ?? 'scheduled',
+                      onStatusChanged: () {},
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 class _ResultAdminTab extends StatefulWidget {
@@ -1064,8 +1408,11 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
   Future<void> _createResult() async {
     final matches = await _db
         .from('matches')
-        .select('id, teams, date_time, competition_id, season_id, status')
-        .inFilter('status', ['scheduled', 'live'])
+        .select(
+          'id, teams, date_time, competition_id, season_id, status, phase, '
+          'home_competition_team_id, away_competition_team_id',
+        )
+        .inFilter('status', ['scheduled', 'live', 'finished'])
         .order('date_time', ascending: false);
     final competitions = await _db
         .from('competitions')
@@ -1093,12 +1440,17 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
     final away = TextEditingController();
     final homeScore = TextEditingController(text: '0');
     final awayScore = TextEditingController(text: '0');
+    final homePenalties = TextEditingController();
+    final awayPenalties = TextEditingController();
     final scorers = TextEditingController();
     final assists = TextEditingController();
     String? competitionId = competitions.first['id'] as String;
     String category = competitions.first['name'] as String;
     String? matchId;
     String? matchDate;
+    var matchPhase = 'league';
+    var homeTeamLocked = false;
+    var awayTeamLocked = false;
     final formKey = GlobalKey<FormState>();
     final created = await showDialog<bool>(
       context: context,
@@ -1136,6 +1488,11 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
                       refreshDialog(() {
                         matchId = value;
                         matchDate = match['date_time'] as String;
+                        matchPhase = match['phase'] as String? ?? 'league';
+                        homeTeamLocked =
+                            match['home_competition_team_id'] != null;
+                        awayTeamLocked =
+                            match['away_competition_team_id'] != null;
                         competitionId = match['competition_id'] as String;
                         category =
                             competitions.firstWhere(
@@ -1162,6 +1519,7 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
                   const SizedBox(height: 12),
                   TextFormField(
                     controller: home,
+                    readOnly: homeTeamLocked,
                     decoration: const InputDecoration(
                       labelText: 'Équipe à domicile',
                     ),
@@ -1170,6 +1528,7 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
                   const SizedBox(height: 12),
                   TextFormField(
                     controller: away,
+                    readOnly: awayTeamLocked,
                     decoration: const InputDecoration(
                       labelText: 'Équipe visiteuse',
                     ),
@@ -1186,6 +1545,7 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
                             labelText: 'Score domicile',
                           ),
                           validator: _nonNegativeInteger,
+                          onChanged: (_) => refreshDialog(() {}),
                         ),
                       ),
                       const SizedBox(width: 12),
@@ -1197,10 +1557,61 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
                             labelText: 'Score visiteur',
                           ),
                           validator: _nonNegativeInteger,
+                          onChanged: (_) => refreshDialog(() {}),
                         ),
                       ),
                     ],
                   ),
+                  if (matchPhase == 'knockout' &&
+                      int.tryParse(homeScore.text) != null &&
+                      int.tryParse(homeScore.text) ==
+                          int.tryParse(awayScore.text)) ...[
+                    const SizedBox(height: 12),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Tirs au but (obligatoires si le score est nul)',
+                        style: TextStyle(color: Color(0xFFFCD116)),
+                      ),
+                    ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextFormField(
+                            controller: homePenalties,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: 'Domicile',
+                            ),
+                            validator: _nonNegativeInteger,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: TextFormField(
+                            controller: awayPenalties,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: 'Visiteur',
+                            ),
+                            validator: (value) {
+                              final awayValue =
+                                  int.tryParse(value?.trim() ?? '');
+                              final homeValue =
+                                  int.tryParse(homePenalties.text.trim());
+                              if (awayValue == null || homeValue == null) {
+                                return 'Saisissez les deux scores.';
+                              }
+                              if (awayValue == homeValue) {
+                                return 'Les tirs au but doivent désigner un vainqueur.';
+                              }
+                              return null;
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                   const SizedBox(height: 14),
                   TextFormField(
                     controller: scorers,
@@ -1244,7 +1655,13 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
         matchId != null &&
         matchDate != null) {
       try {
-        await _db.from('match_results').insert({
+        final existingResult = await _db
+            .from('match_results')
+            .select('id')
+            .eq('match_id', matchId!)
+            .maybeSingle();
+
+        final resultData = {
           'match_id': matchId,
           'season_id': availableMatches.firstWhere(
             (item) => item['id'] == matchId,
@@ -1255,13 +1672,34 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
           'away_team_name': away.text.trim(),
           'home_score': int.parse(homeScore.text),
           'away_score': int.parse(awayScore.text),
+          'home_penalties':
+              matchPhase == 'knockout' &&
+                  int.tryParse(homeScore.text) ==
+                      int.tryParse(awayScore.text)
+              ? int.parse(homePenalties.text)
+              : null,
+          'away_penalties':
+              matchPhase == 'knockout' &&
+                  int.tryParse(homeScore.text) ==
+                      int.tryParse(awayScore.text)
+              ? int.parse(awayPenalties.text)
+              : null,
           'match_date': DateTime.parse(matchDate!).toUtc().toIso8601String(),
           'status': 'finished',
           'validated_at': DateTime.now().toUtc().toIso8601String(),
           'validated_by': _db.auth.currentUser!.id,
           if (scorers.text.trim().isNotEmpty) 'scorers': scorers.text.trim(),
           if (assists.text.trim().isNotEmpty) 'assists': assists.text.trim(),
-        });
+        };
+
+        if (existingResult != null) {
+          await _db
+              .from('match_results')
+              .update(resultData)
+              .eq('id', existingResult['id']);
+        } else {
+          await _db.from('match_results').insert(resultData);
+        }
         try {
           await _db
               .from('matches')
@@ -1277,9 +1715,10 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
             _future = _load();
           });
         }
-      } catch (_) {
+        _notice('Résultat publié avec succès !');
+      } catch (e) {
         _notice(
-          'Le résultat n’a pas pu être publié. Vérifiez vos droits et les données.',
+          'Le résultat n’a pas pu être publié : $e',
         );
       }
     }
@@ -1287,6 +1726,8 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
     away.dispose();
     homeScore.dispose();
     awayScore.dispose();
+    homePenalties.dispose();
+    awayPenalties.dispose();
     scorers.dispose();
     assists.dispose();
   }
@@ -1294,10 +1735,18 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
   Future<void> _editResult(Map<String, dynamic> row) async {
     final homeScore = TextEditingController(text: '${row['home_score'] ?? 0}');
     final awayScore = TextEditingController(text: '${row['away_score'] ?? 0}');
+    final homePenalties = TextEditingController(
+      text: '${row['home_penalties'] ?? ''}',
+    );
+    final awayPenalties = TextEditingController(
+      text: '${row['away_penalties'] ?? ''}',
+    );
+    final isKnockout = row['phase'] == 'knockout';
     final formKey = GlobalKey<FormState>();
     final saved = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, refreshDialog) => AlertDialog(
         backgroundColor: const Color(0xFF1A2634),
         title: const Text(
           'Corriger le score',
@@ -1305,29 +1754,90 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
         ),
         content: Form(
           key: formKey,
-          child: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Expanded(
-                child: TextFormField(
-                  controller: homeScore,
-                  keyboardType: TextInputType.number,
-                  decoration: InputDecoration(
-                    labelText: row['home_team_name'] as String? ?? 'Domicile',
+              Row(
+                children: [
+                  Expanded(
+                    child: TextFormField(
+                      controller: homeScore,
+                      keyboardType: TextInputType.number,
+                      decoration: InputDecoration(
+                        labelText:
+                            row['home_team_name'] as String? ?? 'Domicile',
+                      ),
+                      validator: _nonNegativeInteger,
+                      onChanged: (_) => refreshDialog(() {}),
+                    ),
                   ),
-                  validator: _nonNegativeInteger,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: TextFormField(
-                  controller: awayScore,
-                  keyboardType: TextInputType.number,
-                  decoration: InputDecoration(
-                    labelText: row['away_team_name'] as String? ?? 'Visiteur',
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: TextFormField(
+                      controller: awayScore,
+                      keyboardType: TextInputType.number,
+                      decoration: InputDecoration(
+                        labelText:
+                            row['away_team_name'] as String? ?? 'Visiteur',
+                      ),
+                      validator: _nonNegativeInteger,
+                      onChanged: (_) => refreshDialog(() {}),
+                    ),
                   ),
-                  validator: _nonNegativeInteger,
-                ),
+                ],
               ),
+              if (isKnockout) ...[
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: homePenalties,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Tirs au but domicile',
+                        ),
+                        validator:
+                            int.tryParse(homeScore.text) != null &&
+                                int.tryParse(homeScore.text) ==
+                                    int.tryParse(awayScore.text)
+                            ? _nonNegativeInteger
+                            : null,
+                        onChanged: (_) => refreshDialog(() {}),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextFormField(
+                        controller: awayPenalties,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Tirs au but visiteur',
+                        ),
+                        validator: (value) {
+                          if (int.tryParse(homeScore.text) == null ||
+                              int.tryParse(homeScore.text) !=
+                                  int.tryParse(awayScore.text)) {
+                            return null;
+                          }
+                          final homeValue =
+                              int.tryParse(homePenalties.text.trim());
+                          final awayValue =
+                              int.tryParse(value?.trim() ?? '');
+                          if (homeValue == null || awayValue == null) {
+                            return 'Saisissez les deux scores.';
+                          }
+                          if (homeValue == awayValue) {
+                            return 'Il faut désigner un vainqueur.';
+                          }
+                          return null;
+                        },
+                        onChanged: (_) => refreshDialog(() {}),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
           ),
         ),
@@ -1343,6 +1853,7 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
           ),
         ],
       ),
+      ),
     );
     if (saved == true) {
       try {
@@ -1351,6 +1862,18 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
             .update({
               'home_score': int.parse(homeScore.text),
               'away_score': int.parse(awayScore.text),
+              'home_penalties':
+                  isKnockout &&
+                      int.tryParse(homeScore.text) ==
+                          int.tryParse(awayScore.text)
+                  ? int.parse(homePenalties.text)
+                  : null,
+              'away_penalties':
+                  isKnockout &&
+                      int.tryParse(homeScore.text) ==
+                          int.tryParse(awayScore.text)
+                  ? int.parse(awayPenalties.text)
+                  : null,
               'validated_at': DateTime.now().toUtc().toIso8601String(),
               'validated_by': _db.auth.currentUser!.id,
             })
@@ -1366,6 +1889,8 @@ class _ResultAdminTabState extends State<_ResultAdminTab> {
     }
     homeScore.dispose();
     awayScore.dispose();
+    homePenalties.dispose();
+    awayPenalties.dispose();
   }
 
   void _notice(String text) =>
@@ -2502,6 +3027,49 @@ class _OrderAdminTabState extends State<_OrderAdminTab> {
     }
   }
 
+  Future<void> _confirmPaymentManually(String orderId) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A2634),
+        title: const Text('Confirmer le paiement', style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'Confirmez-vous avoir reçu le paiement Mobile Money de l’acheteur pour cette commande ?',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: const Color(0xFF008751)),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Oui, confirmer'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    try {
+      final res = await _db.rpc('admin_confirm_marketplace_order', params: {'p_order_id': orderId});
+      final map = Map<String, dynamic>.from(res as Map);
+      if (map['success'] == true) {
+        _notice('Commande confirmée avec succès ! Code de retrait généré.');
+        if (mounted) {
+          setState(() {
+            _future = _load();
+          });
+        }
+      } else {
+        _notice(map['message']?.toString() ?? 'Confirmation impossible.');
+      }
+    } catch (e) {
+      _notice('Erreur : $e');
+    }
+  }
+
   Future<void> _setFulfillment(Map<String, dynamic> item, String status) async {
     try {
       await _db
@@ -2634,14 +3202,25 @@ class _OrderAdminTabState extends State<_OrderAdminTab> {
                       ),
                     ),
                     const Spacer(),
+                    OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFFFCD116),
+                        side: const BorderSide(color: Color(0xFFFCD116)),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      onPressed: () => _refreshPaymentStatus(order['id'] as String),
+                      icon: const Icon(Icons.refresh, size: 14),
+                      label: const Text('Actualiser', style: TextStyle(fontSize: 11)),
+                    ),
+                    const SizedBox(width: 8),
                     FilledButton.icon(
                       style: FilledButton.styleFrom(
                         backgroundColor: const Color(0xFF008751),
                         visualDensity: VisualDensity.compact,
                       ),
-                      onPressed: () => _refreshPaymentStatus(order['id'] as String),
-                      icon: const Icon(Icons.refresh, size: 16),
-                      label: const Text('Vérifier le paiement', style: TextStyle(fontSize: 12)),
+                      onPressed: () => _confirmPaymentManually(order['id'] as String),
+                      icon: const Icon(Icons.check, size: 14),
+                      label: const Text('Confirmer', style: TextStyle(fontSize: 11)),
                     ),
                   ],
                 ),

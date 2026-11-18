@@ -91,6 +91,7 @@ serve(async (req) => {
     const apiKey = Deno.env.get("YENGAPAY_API_KEY")?.trim() ||
       Deno.env.get("YENGA_API_KEY")?.trim() ||
       requiredEnv("YENGAPAY_API_KEY");
+    const webhookUrl = `${supabaseUrl}/functions/v1/yenga-webhook`;
     paymentRequestStarted = true;
     const paymentResponse = await fetch(
       `${apiBase}/groups/${encodeURIComponent(groupId)}/payment-intent/${encodeURIComponent(projectId)}`,
@@ -100,6 +101,10 @@ serve(async (req) => {
         body: JSON.stringify({
           paymentAmount: ticketPrice,
           reference: reservedTicketId,
+          callback_url: webhookUrl,
+          callbackUrl: webhookUrl,
+          return_url: webhookUrl,
+          customerNumber: phoneNumber,
           articles: [{
             title: `Billet ${categoryName}`,
             description: `Accès au match ${matchId}`,

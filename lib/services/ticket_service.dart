@@ -69,6 +69,72 @@ class TicketService {
     }
   }
 
+  /// Stream temps réel des billets de l'utilisateur courant.
+  /// Note : .stream() ne supporte pas les jointures ; les données match sont enrichies via un cache local.
+  Stream<List<TicketModel>> streamUserTickets() {
+    final user = _supabase.auth.currentUser;
+    if (user == null) return Stream.value([]);
+
+    // Cache local des données match pour enrichir les tickets du stream
+    final Map<String, Map<String, dynamic>> matchCache = {};
+
+    return _supabase
+        .from('tickets')
+        .stream(primaryKey: ['id'])
+        .eq('user_id', user.id)
+        .order('created_at', ascending: false)
+        .asyncMap((rows) async {
+          final list =
+              rows.map((r) => Map<String, dynamic>.from(r)).toList();
+
+          // Récupérer les matchIds manquants dans le cache
+          final missingIds = list
+              .map((t) => t['match_id'] as String?)
+              .whereType<String>()
+              .where((id) => !matchCache.containsKey(id))
+              .toSet()
+              .toList();
+
+          if (missingIds.isNotEmpty) {
+            try {
+              final matchRows = await _supabase
+                  .from('matches')
+                  .select('id, teams, date_time, stadium, city')
+                  .filter('id', 'in', missingIds);
+              for (final m in (matchRows as List)) {
+                final map = Map<String, dynamic>.from(m as Map);
+                matchCache[map['id'] as String] = map;
+              }
+            } catch (_) {}
+          }
+
+          return list.map((json) {
+            final mId = json['match_id'] as String?;
+            final combined = Map<String, dynamic>.from(json);
+            if (mId != null && matchCache.containsKey(mId)) {
+              combined['match'] = matchCache[mId];
+            }
+            return TicketModel.fromJson(combined);
+          }).toList();
+        });
+  }
+
+  /// Vérifie ou confirme un billet après paiement Mobile Money
+  Future<Map<String, dynamic>> verifyOrConfirmTicket(String ticketId) async {
+    try {
+      final response = await _supabase.rpc(
+        'verify_or_confirm_ticket',
+        params: {'p_ticket_id': ticketId},
+      );
+      return Map<String, dynamic>.from(response as Map);
+    } catch (e) {
+      return {
+        'success': false,
+        'message': 'Impossible de vérifier le billet : $e',
+      };
+    }
+  }
+
   /// Valide et scanne un ticket via son secret QR (Réservé aux agents de stade / super admin)
   Future<Map<String, dynamic>> scanAndValidateTicket(String qrSecret) async {
     try {

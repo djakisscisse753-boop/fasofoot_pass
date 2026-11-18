@@ -3,6 +3,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../models/match_model.dart';
 import '../../services/yenga_pay_service.dart';
+import 'my_tickets_screen.dart';
 
 class MatchDetailBookingScreen extends StatefulWidget {
   final MatchModel match;

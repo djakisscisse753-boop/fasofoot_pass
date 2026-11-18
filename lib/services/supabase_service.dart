@@ -11,6 +11,7 @@ class SupabaseService {
         .from('matches')
         .select(
           'id, teams, date_time, stadium, city, price, is_hero, status, '
+          'phase, matchday, stage_name, group_name, '
           'home_club:clubs!matches_home_club_id_fkey(name, logo_url), '
           'away_club:clubs!matches_away_club_id_fkey(name, logo_url), '
           'competition:competitions(name)',
@@ -21,5 +22,14 @@ class SupabaseService {
     return (response as List)
         .map((row) => MatchModel.fromJson(Map<String, dynamic>.from(row)))
         .toList();
+  }
+
+  /// Stream temps réel des matchs à venir disponibles à la réservation
+  Stream<List<MatchModel>> streamUpcomingMatches() {
+    return _client
+        .from('matches')
+        .stream(primaryKey: ['id'])
+        .order('date_time')
+        .asyncMap((_) => getUpcomingMatches());
   }
 }

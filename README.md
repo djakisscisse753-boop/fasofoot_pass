@@ -29,7 +29,15 @@ Avant un déploiement, vérifier les migrations avec `supabase migration list --
 
 À la dernière vérification de FasoFootBD, les versions 022–024 n'étaient pas enregistrées dans l'historique distant. Elles ont été rendues compatibles avec le catalogue source de vérité, mais leur simulation (`--dry-run`) reste obligatoire avant `db push`.
 
+La migration locale `20261114120000_resilient_payments_and_competitions_fix.sql` n'est pas enregistrée sur FasoFootBD. Elle contient une ancienne fonction qui peut transformer un billet en attente en billet payé sans preuve YengaPay et des mises à jour de données ciblées; ne pas l'appliquer telle quelle ni lancer de `db push` global avant sa réconciliation.
+
 Les matchs proviennent de `matches`, les scores de `match_results`, et les articles de `products`. Vérifier les matchs, résultats et produits existants comme données officielles avant lancement public.
+
+`20261111155108_competition_formats.sql` ajoute la configuration des éditions et de leurs équipes, les groupes et qualifiés des tournois, les journées/tours des matchs, ainsi que l’élimination automatique des perdants après validation d’un résultat à élimination directe. Les qualifiés de groupe sont calculés une fois tous les matchs programmés terminés, avec comme départage les points, la différence de buts, les buts marqués puis le nom de l’équipe. Les égalités en phase éliminatoire doivent être départagées aux tirs au but. Cette migration est enregistrée en production sous cette version. Les migrations locales 022–024 restent à réconcilier après simulation du `--dry-run`; ne lance pas `db push` tant que leur divergence n’est pas résolue.
+
+`20261111163255_fix_competition_reuse.sql` permet de réutiliser une compétition existante par son nom même si son code historique diffère du code généré par l’application. L’administration permet aussi de supprimer une compétition inutilisée avec confirmation; les références à des matchs ou résultats empêchent sa suppression. Cette migration est appliquée en production sous cette version.
+
+`20261115174500_payment_status_recovery.sql` sécurise la confirmation des billets côté serveur, rend la vérification client non mutante, actualise le cache PostgREST et ajoute matchs/résultats aux tables Realtime. Les écrans actifs actualisent aussi les données périodiquement afin de rester à jour même si Realtime est indisponible.
 
 ## Paiements YengaPay
 

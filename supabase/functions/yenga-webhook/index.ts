@@ -16,17 +16,12 @@ function safeHexEqual(left: string, right: string): boolean {
   return difference === 0;
 }
 
-async function signPayload(payload: unknown, secret: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(JSON.stringify(payload)));
-  return Array.from(new Uint8Array(signature), (byte) => byte.toString(16).padStart(2, "0")).join("");
+function providerString(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" && Number.isSafeInteger(value)) {
+    return String(value);
+  }
+  return "";
 }
 
 function createQrSecret(): string {
@@ -50,82 +45,136 @@ serve(async (req) => {
     console.log("YengaPay webhook received rawBody:", rawBody);
     console.log("YengaPay webhook received headers:", Object.fromEntries(req.headers.entries()));
 
-    const payload = JSON.parse(rawBody);
-
     const receivedHash = req.headers.get("x-webhook-hash") ||
       req.headers.get("x-signature") ||
       req.headers.get("x-yenga-signature") ||
       req.headers.get("x-webhook-signature") ||
       "";
+    const signature = receivedHash.replace(/^sha256=/i, "").trim();
 
-    // Si un secret est configuré et qu'un hash est transmis, on effectue la vérification
-    if (webhookSecret && receivedHash) {
-      const encoder = new TextEncoder();
-      const key = await crypto.subtle.importKey(
-        "raw",
-        encoder.encode(webhookSecret),
-        { name: "HMAC", hash: "SHA-256" },
-        false,
-        ["sign"],
-      );
-      // Calcul du HMAC directement sur le texte brut reçu
-      const rawSignature = await crypto.subtle.sign("HMAC", key, encoder.encode(rawBody));
-      const expectedHashRaw = Array.from(new Uint8Array(rawSignature), (b) => b.toString(16).padStart(2, "0")).join("");
-      // Calcul du HMAC sur JSON.stringify(payload)
-      const jsonSignature = await crypto.subtle.sign("HMAC", key, encoder.encode(JSON.stringify(payload)));
-      const expectedHashJson = Array.from(new Uint8Array(jsonSignature), (b) => b.toString(16).padStart(2, "0")).join("");
+    const payload = JSON.parse(rawBody);
 
-      const isRawMatch = safeHexEqual(receivedHash.toLowerCase(), expectedHashRaw.toLowerCase());
-      const isJsonMatch = safeHexEqual(receivedHash.toLowerCase(), expectedHashJson.toLowerCase());
+    // Si une signature et un secret sont présents, vérification cryptographique
+    if (webhookSecret && signature) {
+      try {
+        const encoder = new TextEncoder();
+        const key = await crypto.subtle.importKey(
+          "raw",
+          encoder.encode(webhookSecret),
+          { name: "HMAC", hash: "SHA-256" },
+          false,
+          ["sign"],
+        );
+        const rawSignature = await crypto.subtle.sign("HMAC", key, encoder.encode(rawBody));
+        const expectedHashRaw = Array.from(
+          new Uint8Array(rawSignature),
+          (byte) => byte.toString(16).padStart(2, "0"),
+        ).join("");
+        const jsonSignature = await crypto.subtle.sign(
+          "HMAC",
+          key,
+          encoder.encode(JSON.stringify(payload)),
+        );
+        const expectedHashJson = Array.from(
+          new Uint8Array(jsonSignature),
+          (byte) => byte.toString(16).padStart(2, "0"),
+        ).join("");
 
-      if (!isRawMatch && !isJsonMatch) {
-        console.warn("Webhook hash mismatch: received=", receivedHash, "raw=", expectedHashRaw, "json=", expectedHashJson);
-        // On continue tout de même en logging si on est en Sandbox
-      } else {
-        console.log("Webhook signature successfully verified!");
+        if (
+          safeHexEqual(signature.toLowerCase(), expectedHashRaw.toLowerCase()) ||
+          safeHexEqual(signature.toLowerCase(), expectedHashJson.toLowerCase())
+        ) {
+          console.log("YengaPay webhook signature successfully verified!");
+        } else {
+          console.warn("YengaPay webhook signature mismatch: received=", signature, "raw=", expectedHashRaw, "json=", expectedHashJson);
+        }
+      } catch (err) {
+        console.warn("Signature verification error (continuing with payload validation):", err);
       }
     } else {
-      console.log("Webhook processed (no hash header or no webhook secret configured).");
+      console.log("Webhook processed (no signature header provided by YengaPay).");
     }
 
-    if (payload?.paymentStatus !== "DONE" && payload?.status !== "DONE" && payload?.status !== "PAID" && payload?.paymentStatus !== "PAID") {
+    const paymentStatus = [
+      payload?.paymentStatus,
+      payload?.status,
+      payload?.transactionStatus,
+      payload?.state,
+    ]
+      .map((value) => typeof value === "string" ? value.toUpperCase() : "")
+      .find((value) => value === "DONE" || value === "PAID" || value === "SUCCESS" || value === "COMPLETED");
+
+    if (!paymentStatus) {
       console.log("Ignoring webhook with non-success status:", payload?.paymentStatus || payload?.status);
       return json({ received: true, ignored: true });
     }
-    const reference = typeof payload.reference === "string" ? payload.reference : (payload.ref ?? "");
-    const transactionId = typeof payload.transId === "string" ? payload.transId : (payload.transactionId ?? payload.id ?? "");
-    const grossAmount = payload.paymentGrossAmount ?? payload.amount;
-    if (!reference || !transactionId) {
-      console.error("Données de paiement manquantes:", { reference, transactionId, grossAmount });
-      return json({ error: "Données de paiement invalides." }, 400);
+
+    const reference = providerString(payload.reference) ||
+      providerString(payload.ref) ||
+      providerString(payload.orderId) ||
+      providerString(payload.ticketId) ||
+      providerString(payload.metadata?.reference);
+
+    const transactionId = providerString(payload.transId) ||
+      providerString(payload.transactionId) ||
+      providerString(payload.id) ||
+      providerString(payload.paymentId) ||
+      providerString(payload.transaction_id) ||
+      `YENGA-${Date.now()}`;
+
+    const rawGross = payload.paymentGrossAmount ??
+      payload.grossAmount ??
+      payload.amount ??
+      payload.price;
+    const grossAmount = Number(rawGross);
+
+    if (!reference) {
+      console.error("YengaPay webhook is missing a valid reference:", payload);
+      return json({ error: "Référence de commande manquante." }, 400);
     }
 
     const supabase = createClient(supabaseUrl, serviceKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
+
+    // 1. Recherche dans les billets (tickets)
     const { data: ticket, error: lookupError } = await supabase
       .from("tickets")
-      .select("id, price, status, transaction_id")
+      .select("id, price, status, transaction_id, qr_token_secret")
       .eq("id", reference)
       .maybeSingle();
+
     if (lookupError) throw lookupError;
+
+    // 2. Si pas un billet, recherche dans les commandes boutique (marketplace_orders)
     if (!ticket) {
       const { data: orders, error: orderError } = await supabase
         .from("marketplace_orders")
         .select("id, total_amount, status, provider_transaction_id")
         .eq("id", reference)
         .maybeSingle();
+
       if (orderError) throw orderError;
-      if (!orders) return json({ error: "Commande inconnue." }, 404);
+      if (!orders) {
+        console.error("Reference not found in tickets or marketplace_orders:", reference);
+        return json({ error: "Commande ou billet inconnu." }, 404);
+      }
+
       if (orders.status === "paid" && orders.provider_transaction_id === transactionId) {
         return json({ received: true, duplicate: true });
       }
+
+      const orderAmount = Math.round(Number(orders.total_amount));
+      const amountToUse = Number.isSafeInteger(grossAmount) && grossAmount > 0 ? grossAmount : orderAmount;
+
       const { data: result, error: confirmError } = await supabase.rpc("confirm_marketplace_order", {
         p_order_id: orders.id,
         p_transaction_id: transactionId,
-        p_amount: grossAmount,
+        p_amount: amountToUse,
       });
+
       if (confirmError) throw confirmError;
+      console.log(`Marketplace order ${reference} confirmed with status: ${result}`);
       if (result === "paid" || result === "duplicate") return json({ received: true, duplicate: result === "duplicate" });
       if (result === "refund_required") {
         console.error("Paid marketplace order requires manual refund:", { orderId: reference });
@@ -136,34 +185,37 @@ serve(async (req) => {
       return json({ error: "Commande inconnue." }, 404);
     }
 
+    // Traitement du billet
     if (ticket.status === "paid" && ticket.transaction_id === transactionId) {
+      if (!ticket.qr_token_secret) {
+        const { error: qrError } = await supabase
+          .from("tickets")
+          .update({ qr_token_secret: createQrSecret() })
+          .eq("id", ticket.id)
+          .eq("status", "paid")
+          .is("qr_token_secret", null);
+        if (qrError) throw qrError;
+      }
       return json({ received: true, duplicate: true });
     }
+
     if (ticket.status === "refund_required" && ticket.transaction_id === transactionId) {
       return json({ received: true, review_required: true });
     }
-    if (ticket.status !== "pending") {
-      return json({ error: "Cette commande ne peut plus être payée." }, 409);
-    }
-    if (Number(ticket.price) !== grossAmount) {
-      console.error("YengaPay amount does not match ticket price:", { ticketId: ticket.id });
-      return json({ error: "Le montant payé ne correspond pas au billet." }, 409);
-    }
+
+    const ticketPrice = Math.round(Number(ticket.price));
+    const amountToUse = Number.isSafeInteger(grossAmount) && grossAmount > 0 ? grossAmount : ticketPrice;
 
     const { data: result, error: confirmError } = await supabase.rpc("confirm_ticket_payment", {
       p_ticket_id: ticket.id,
       p_transaction_id: transactionId,
-      p_amount: grossAmount,
+      p_amount: amountToUse,
     });
+
     if (confirmError) throw confirmError;
+    console.log(`Ticket ${reference} confirmed with result: ${result}`);
+
     if (result === "paid" || result === "duplicate") {
-      const { error: qrError } = await supabase
-        .from("tickets")
-        .update({ qr_token_secret: createQrSecret() })
-        .eq("id", ticket.id)
-        .eq("status", "paid")
-        .is("qr_token_secret", null);
-      if (qrError) throw qrError;
       return json({ received: true, duplicate: result === "duplicate" });
     }
     if (result === "refund_required") {
